@@ -206,6 +206,7 @@ async function findComparisonReport(inputPath, report) {
   const currentDate = latestUpdateDate(report);
   if (!currentDate) return null;
 
+  const currentReportDate = report.reportDate || report.date || "";
   const targetDate = new Date(currentDate.getTime() - 24 * 60 * 60 * 1000);
   const targetLocalDay = formatShanghaiDate(targetDate);
   const reportPaths = await findCombinedReportPaths();
@@ -226,16 +227,26 @@ async function findComparisonReport(inputPath, report) {
     const candidateDate = latestUpdateDate(candidateReport);
     if (!candidateDate || formatShanghaiDate(candidateDate) !== targetLocalDay) continue;
 
+    const candidateReportDate = candidateReport.reportDate || candidateReport.date || "";
+    const reportDateRank = !currentReportDate
+      ? 0
+      : candidateReportDate === currentReportDate
+        ? 0
+        : candidateReportDate
+          ? 2
+          : 1;
+
     candidates.push({
       inputPath: candidatePath,
       report: candidateReport,
       rows: candidateRows,
       updateTime: formatShanghaiMinute(candidateDate),
       distanceMs: Math.abs(candidateDate.getTime() - targetDate.getTime()),
+      reportDateRank,
     });
   }
 
-  candidates.sort((a, b) => a.distanceMs - b.distanceMs);
+  candidates.sort((a, b) => a.reportDateRank - b.reportDateRank || a.distanceMs - b.distanceMs);
   return candidates[0] || null;
 }
 
