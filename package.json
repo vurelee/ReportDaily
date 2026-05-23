@@ -8,7 +8,8 @@
     "temu:login:cdp": "node scripts/temu-login-cdp.mjs",
     "temu:report": "node scripts/temu-report.mjs",
     "temu:report:all": "node scripts/temu-run-all.mjs",
-    "temu:report:all:image": "node scripts/temu-run-all.mjs && node scripts/temu-summary-image.mjs --send-wecom"
+    "temu:report:all:image": "node scripts/temu-run-all.mjs && if [ \"${TEMU_REPORT_DATE:-today}\" = \"today\" ]; then node scripts/temu-abnormal-orders.mjs || true; node scripts/temu-summary-image.mjs --send-wecom --include-abnormal; else node scripts/temu-summary-image.mjs --send-wecom; fi",
+    "temu:abnormal": "node scripts/temu-abnormal-orders.mjs"
   },
   "dependencies": {
     "playwright": "^1.52.0"

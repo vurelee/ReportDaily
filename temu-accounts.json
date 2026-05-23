@@ -13,7 +13,7 @@
       "label": "Whitine / LEEEV",
       "cdpProfileDir": "/Users/vure/ReportDalily/temu-chrome-cdp-profile-account2",
       "cdpPort": 9223,
-      "shops": ["Whitine Products Global", "LEEEV Global Outlet"],
+      "shops": ["Whitine Products Global", "LEEEV Global Outlet", "LEEEV"],
       "knownShops": [
         "Whitine Products",
         "Whitine Products Global",

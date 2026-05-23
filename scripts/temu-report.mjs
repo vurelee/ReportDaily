@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { config } from "./temu-config.mjs";
 import { connectCdpChrome } from "./chrome-cdp.mjs";
+import { closeCdpPages } from "./cdp-page-cleanup.mjs";
+import { closeTemuPopups } from "./temu-popup-cleaner.mjs";
 
 const now = new Date();
 const stamp = now.toISOString().replace(/[:.]/g, "-");
@@ -51,6 +53,11 @@ async function waitSettled(page) {
 }
 
 async function dismissBlockingModals(page) {
+  const primaryResult = await closeTemuPopups(page);
+  if (primaryResult.clicked > 0 || primaryResult.hidden > 0) {
+    await page.waitForTimeout(500);
+  }
+
   const modal = page.locator('[data-testid="beast-core-modal"], [data-testid="beast-core-modal-container"]');
   const visibleModalCount = await modal
     .evaluateAll((nodes) =>
@@ -511,10 +518,36 @@ const knownShopNames = [
 async function visibleShopLabel(page, shopName) {
   const exactMatches = await page.getByText(shopName, { exact: true }).count().catch(() => 0);
   if (exactMatches > 0) return shopName;
-  return "";
+
+  return await page.evaluate((shopName) => {
+    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const shopLabelText = (text) => clean(text).replace(/\s*(半托管|全托管)\s*$/, "");
+    const isVisible = (node) => {
+      const rect = node.getBoundingClientRect();
+      const style = window.getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    return Array.from(document.querySelectorAll("*")).some(
+      (node) => isVisible(node) && shopLabelText(node.innerText || node.textContent) === shopName,
+    )
+      ? shopName
+      : "";
+  }, shopName);
 }
 
 async function currentShopName(page) {
+  const current = await page.evaluate((knownShopNames) => {
+    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const body = clean(document.body?.innerText || document.body?.textContent || "");
+    return (
+      knownShopNames.find((shopName) =>
+        new RegExp(`当前店铺\\s*${escapeRegExp(shopName)}(?:\\s|半托管|全托管|切换|$)`).test(body),
+      ) || ""
+    );
+  }, knownShopNames);
+  if (current) return current;
+
   for (const shopName of knownShopNames) {
     if (await visibleShopLabel(page, shopName)) return shopName;
   }
@@ -551,6 +584,7 @@ async function openShopSwitcher(page) {
 async function clickShopSwitchButton(page, shopName) {
   const clickPoint = await page.evaluate((shopName) => {
     const normalizedText = (node) => (node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
+    const shopLabelText = (node) => normalizedText(node).replace(/\s*(半托管|全托管)\s*$/, "");
     const isVisible = (node) => {
       const rect = node.getBoundingClientRect();
       const style = window.getComputedStyle(node);
@@ -572,7 +606,7 @@ async function clickShopSwitchButton(page, shopName) {
     const labels = Array.from(document.querySelectorAll("*"))
       .filter((node) => {
         if (!isVisible(node)) return false;
-        return normalizedText(node) === shopName;
+        return shopLabelText(node) === shopName;
       })
       .map((node) => node.getBoundingClientRect())
       .filter((rect) => rect.width > 0 && rect.height > 0)
@@ -991,5 +1025,6 @@ try {
 
   throw error;
 } finally {
+  await closeCdpPages(context);
   await browser.close().catch(() => {});
 }

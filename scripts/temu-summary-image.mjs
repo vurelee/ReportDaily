@@ -35,6 +35,19 @@ async function findLatestCombinedReport() {
   return matches[0];
 }
 
+async function findLatestAbnormalReport() {
+  const entries = await fs.readdir(reportDir);
+  const matches = entries
+    .filter((name) => /^temu-abnormal-orders-.+\.json$/.test(name))
+    .map((name) => path.join(reportDir, name));
+
+  const stats = await Promise.all(
+    matches.map(async (filePath) => ({ filePath, stat: await fs.stat(filePath) })),
+  );
+  stats.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+  return stats[0]?.filePath || "";
+}
+
 function htmlEscape(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -111,6 +124,31 @@ function rowsByShop(rows) {
   return new Map(rows.map((row) => [row.shop, row]));
 }
 
+function comparisonRowsByShop(currentRows, comparison) {
+  if (!comparison) return new Map();
+
+  const comparisonShopRows = comparison.rows.filter((row) => !row.isTotal);
+  const comparisonMap = rowsByShop(comparisonShopRows);
+  if (currentRows.every((row) => comparisonMap.has(row.shop))) {
+    const totalQuantity = currentRows.reduce(
+      (sum, row) => sum + comparisonMap.get(row.shop).quantityValue,
+      0,
+    );
+    const totalAmount = currentRows.reduce(
+      (sum, row) => sum + comparisonMap.get(row.shop).amountValue,
+      0,
+    );
+    comparisonMap.set("合计", {
+      shop: "合计",
+      quantityValue: totalQuantity,
+      amountValue: totalAmount,
+      isTotal: true,
+    });
+  }
+
+  return comparisonMap;
+}
+
 function latestUpdateDate(report) {
   const dates = (report.results || [])
     .flatMap((result) => result.report?.shops || [])
@@ -134,6 +172,10 @@ function buildTitle(report) {
   return `Temu 欧区${reportDateLabel(report)}汇总 ${latestUpdateTime(report)}`;
 }
 
+function buildImageTitle(report) {
+  return `欧区销量汇总 ${actualSalesDate(report)}`;
+}
+
 function reportDateLabel(report) {
   if (report.reportDateLabel) return report.reportDateLabel;
   if (report.dateLabel) return report.dateLabel;
@@ -143,8 +185,87 @@ function reportDateLabel(report) {
   return "今日";
 }
 
+function actualSalesDate(report) {
+  const baseDate = reportGeneratedDate(report) || latestUpdateDate(report);
+  if (!baseDate) return formatShanghaiDate(new Date());
+
+  const offsetDays = isYesterdayReport(report) ? -1 : 0;
+  const actualDate = new Date(baseDate.getTime() + offsetDays * 24 * 60 * 60 * 1000);
+  return formatShanghaiDate(actualDate);
+}
+
+function reportGeneratedDate(report) {
+  if (!report.generatedAt) return null;
+
+  const date = new Date(report.generatedAt);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function isYesterdayReport(report) {
+  const reportDate = report.reportDate || report.date || "";
+  return reportDate === "yesterday" || report.reportDateLabel === "昨日" || report.dateLabel === "昨日";
+}
+
 function buildWecomMarkdownTitle(report) {
   return `### ${buildTitle(report)}`;
+}
+
+function abnormalCountValue(shop) {
+  const value = Number.parseInt(String(shop?.abnormalCount ?? "0"), 10);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function buildAbnormalMarkdown(abnormalReport) {
+  if (!abnormalReport) return "";
+
+  const warningLines = [];
+  let checkedShopCount = 0;
+  let positiveCount = 0;
+
+  for (const result of abnormalReport.results || []) {
+    if (!result.ok) {
+      warningLines.push(
+        `${result.account?.label || result.account?.id || "账号"} 出库单异常读取失败：${result.error || "未知错误"}`,
+      );
+      continue;
+    }
+
+    for (const shop of result.shops || []) {
+      if (shop.hasPermission === false) {
+        warningLines.push(`${shop.shopName} 无权限访问出库单异常页。`);
+        continue;
+      }
+
+      checkedShopCount += 1;
+      const count = abnormalCountValue(shop);
+      if (count > 0) {
+        positiveCount += count;
+        warningLines.push(`${shop.shopName} 出库单异常<font color="warning">${count}</font>条。`);
+      }
+    }
+  }
+
+  if (warningLines.length === 0 && checkedShopCount > 0 && positiveCount === 0) {
+    return "今日出库单异常0条。";
+  }
+
+  return warningLines.join("\n");
+}
+
+async function loadAbnormalReport() {
+  if (!args.includes("--include-abnormal")) return null;
+
+  const selectedPath = getFlagValue("--abnormal-input") || (await findLatestAbnormalReport());
+  if (!selectedPath) return null;
+
+  const inputPath = path.resolve(selectedPath);
+  return JSON.parse(await fs.readFile(inputPath, "utf8"));
+}
+
+function buildWecomMarkdown(report, abnormalReport) {
+  return [buildWecomMarkdownTitle(report), buildAbnormalMarkdown(abnormalReport)]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function parseShanghaiDateTime(value) {
@@ -279,10 +400,8 @@ function deltaHtml(change) {
 
 function buildHtml(rows, report, comparison) {
   const displayRows = appendTotalRow(rows);
-  const comparisonRows = comparison ? rowsByShop(comparison.rows) : new Map();
-  const comparisonText = comparison
-    ? `每项百分比对比：${comparison.updateTime}`
-    : "每项百分比对比：未找到上一日同时间数据";
+  const comparisonRows = comparisonRowsByShop(rows, comparison);
+  const comparisonText = "对比日期为上一日";
   const bodyRows = displayRows
     .map((row) => {
       const previous = comparisonRows.get(row.shop);
@@ -436,7 +555,7 @@ function buildHtml(rows, report, comparison) {
       <body>
         <div class="report">
           <div class="header">
-            <div class="title">${htmlEscape(buildTitle(report))}</div>
+            <div class="title">${htmlEscape(buildImageTitle(report))}</div>
             <div class="sub">${htmlEscape(comparisonText)}</div>
           </div>
           <table>
@@ -461,6 +580,7 @@ async function main() {
 
   const inputPath = path.resolve(getFlagValue("--input") || (await findLatestCombinedReport()));
   const report = JSON.parse(await fs.readFile(inputPath, "utf8"));
+  const abnormalReport = await loadAbnormalReport();
   const rows = collectRows(report);
   const comparison = await findComparisonReport(inputPath, report);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -483,7 +603,7 @@ async function main() {
   let sentWecom = false;
   if (args.includes("--send-wecom") && process.env.TEMU_SEND_WECOM !== "0") {
     try {
-      await sendWecomMarkdown(buildWecomMarkdownTitle(report));
+      await sendWecomMarkdown(buildWecomMarkdown(report, abnormalReport));
       await sendWecomImage(outputPath);
       sentWecom = true;
     } catch (error) {
@@ -494,9 +614,14 @@ async function main() {
   }
 
   console.log(`Input JSON: ${inputPath}`);
+  if (abnormalReport) console.log(`Abnormal JSON: ${path.resolve(getFlagValue("--abnormal-input") || (await findLatestAbnormalReport()))}`);
   if (comparison) console.log(`Comparison JSON: ${comparison.inputPath}`);
   else console.log("Comparison JSON: none");
   console.log(`Saved image: ${outputPath}`);
+  if (args.includes("--print-wecom-markdown")) {
+    console.log("WeCom markdown:");
+    console.log(buildWecomMarkdown(report, abnormalReport));
+  }
   if (sentWecom) console.log("Sent Enterprise WeChat markdown title and image.");
 
   if (sendErrors.length > 0) {
