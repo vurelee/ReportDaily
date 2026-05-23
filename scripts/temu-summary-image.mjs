@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
-import { sendWecomImage } from "./wecom-send.mjs";
+import { sendWecomImage, sendWecomMarkdown } from "./wecom-send.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const reportDir = process.env.TEMU_REPORT_DIR || path.join(rootDir, "temu-reports");
@@ -131,7 +131,20 @@ function latestUpdateTime(report) {
 }
 
 function buildTitle(report) {
-  return `Temu 欧区今日汇总 ${latestUpdateTime(report)}`;
+  return `Temu 欧区${reportDateLabel(report)}汇总 ${latestUpdateTime(report)}`;
+}
+
+function reportDateLabel(report) {
+  if (report.reportDateLabel) return report.reportDateLabel;
+  if (report.dateLabel) return report.dateLabel;
+
+  const reportDate = report.reportDate || report.date;
+  if (reportDate === "yesterday") return "昨日";
+  return "今日";
+}
+
+function buildWecomMarkdownTitle(report) {
+  return `### ${buildTitle(report)}`;
 }
 
 function parseShanghaiDateTime(value) {
@@ -459,6 +472,7 @@ async function main() {
   let sentWecom = false;
   if (args.includes("--send-wecom") && process.env.TEMU_SEND_WECOM !== "0") {
     try {
+      await sendWecomMarkdown(buildWecomMarkdownTitle(report));
       await sendWecomImage(outputPath);
       sentWecom = true;
     } catch (error) {
@@ -472,7 +486,7 @@ async function main() {
   if (comparison) console.log(`Comparison JSON: ${comparison.inputPath}`);
   else console.log("Comparison JSON: none");
   console.log(`Saved image: ${outputPath}`);
-  if (sentWecom) console.log("Sent Enterprise WeChat image.");
+  if (sentWecom) console.log("Sent Enterprise WeChat markdown title and image.");
 
   if (sendErrors.length > 0) {
     throw new Error(`Delivery failed: ${sendErrors.join(" / ")}`);

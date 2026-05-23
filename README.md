@@ -32,25 +32,25 @@ npm run temu:login:cdp
 npm run temu:report:all
 ```
 
-两套账号一起巡检，并通过企业微信群机器人发送紧凑汇总图片：
+两套账号一起巡检，并通过企业微信群机器人发送 markdown 标题和紧凑汇总图片：
 
 ```bash
 npm run temu:report:all:image
 ```
 
-汇总图片会把 `Temu 欧区今日汇总`、日期和时间放在图片标题里，并在每个店铺和合计行展示件数、销售额相对上一日同时间附近报告的涨跌百分比。夜间任务虽然点击 `昨日` 并统计昨日数据，但推送图片仍使用今日汇总口吻。企业微信只通过 `WECOM_WEBHOOK_URL` 群机器人 webhook 发送这一张图片，不额外发送 markdown 或文本摘要。
+汇总图片会把 `Temu 欧区今日汇总` 或 `Temu 欧区昨日汇总`、日期和时间放在图片标题里，并在每个店铺和合计行展示件数、销售额相对上一日同时间附近报告的涨跌百分比。夜间任务点击 `昨日` 并统计昨日数据，推送口径也使用昨日汇总。企业微信通过 `WECOM_WEBHOOK_URL` 群机器人 webhook 先发送 markdown 标题，再发送图片。
 
 ### 汇总图片和企业微信推送规则
 
 `npm run temu:report:all:image` 是定时任务使用的正式发送入口：
 
 - 先生成所有账号合并 JSON，再用 `scripts/temu-summary-image.mjs` 生成 `780px` 宽的紧凑图片表格
-- 图片标题格式固定为 `Temu 欧区今日汇总 YYYY-MM-DD HH:mm`
+- 图片标题格式为 `Temu 欧区今日汇总 YYYY-MM-DD HH:mm` 或 `Temu 欧区昨日汇总 YYYY-MM-DD HH:mm`
 - 表格列固定为 `店铺`、`件数`、`销售额`，最后一行是 `合计`
 - 每个店铺行和合计行都在 `件数`、`销售额` 下方显示相对上一日的百分比变化
 - 对比基准自动选择“上一日、报告更新时间最接近当前报告时间”的 `temu-all-accounts-*.json`
 - 正增长使用绿色上三角，负增长使用红色下三角，无变化或缺少基准使用灰色提示
-- 企业微信只通过 `WECOM_WEBHOOK_URL` 群机器人 webhook 发送这张图片，不使用 `wecom-cli`，也不发送 markdown 或文本摘要
+- 企业微信只通过 `WECOM_WEBHOOK_URL` 群机器人 webhook 发送，不使用 `wecom-cli`；发送顺序为 markdown 标题，然后发送图片
 
 账号、Chrome profile、端口和店铺列表配置在：
 
@@ -76,7 +76,7 @@ npm run temu:report
 - 按净申报价销售额（全店）降序排序；若店铺没有净销售额列，则回退到申报价销售额（全店）
 - 验证排序表头的下三角为蓝色，同时验证表格数据为从高到低
 - `npm run temu:report:all` 只生成所有账号的合并 JSON
-- `npm run temu:report:all:image` 生成紧凑汇总图片，并通过企业微信群机器人 webhook 发送这张图片
+- `npm run temu:report:all:image` 生成紧凑汇总图片，并通过企业微信群机器人 webhook 发送 markdown 标题和图片
 
 输出文件会保存到：
 
@@ -118,7 +118,7 @@ npm run temu:report
 
 当前 launchd 定时策略：
 
-- `00:01`：自动点击 `昨日`，汇总昨日数据，但推送图片标题仍使用 `今日汇总`
+- `00:01`：自动点击 `昨日`，汇总并推送昨日数据，标题使用 `昨日汇总`
 - `09:00`：自动点击 `今日`，汇总并推送今日数据
 
 企业微信webhook开发文档: https://developer.work.weixin.qq.com/document/path/99110
