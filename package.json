@@ -1,0 +1,16 @@
+{
+  "name": "temu-playwright-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "temu:login": "node scripts/temu-login-profile.mjs",
+    "temu:login:cdp": "node scripts/temu-login-cdp.mjs",
+    "temu:report": "node scripts/temu-report.mjs",
+    "temu:report:all": "node scripts/temu-run-all.mjs",
+    "temu:report:all:image": "node scripts/temu-run-all.mjs && node scripts/temu-summary-image.mjs --send-wecom"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}

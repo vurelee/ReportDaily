@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+
+node_modules/
+
+temu-reports/
+temu-chrome-cdp-profile/
+temu-chrome-cdp-profile-account2/
+temu-playwright-profile/
+
+*.log

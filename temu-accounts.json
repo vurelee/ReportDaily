@@ -1,0 +1,26 @@
+{
+  "accounts": [
+    {
+      "id": "setonr",
+      "label": "SETONR",
+      "cdpProfileDir": "/Users/vure/ReportDalily/temu-chrome-cdp-profile",
+      "cdpPort": 9222,
+      "shops": ["SETONR Products", "SETONR Origin"],
+      "knownShops": ["SETONR Products", "SETONR DIRECT", "SETONR Origin", "SETONR"]
+    },
+    {
+      "id": "whitine-leeev",
+      "label": "Whitine / LEEEV",
+      "cdpProfileDir": "/Users/vure/ReportDalily/temu-chrome-cdp-profile-account2",
+      "cdpPort": 9223,
+      "shops": ["Whitine Products Global", "LEEEV Global Outlet"],
+      "knownShops": [
+        "Whitine Products",
+        "Whitine Products Global",
+        "LEEEV Global Outlet",
+        "LEEEV",
+        "LEEEV Selected"
+      ]
+    }
+  ]
+}
