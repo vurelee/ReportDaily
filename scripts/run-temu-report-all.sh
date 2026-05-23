@@ -11,6 +11,15 @@ if [[ -f .env.local ]]; then
   set +a
 fi
 
+if [[ -z "${TEMU_REPORT_DATE:-}" ]]; then
+  current_hour="$(/bin/date '+%H')"
+  if [[ "$current_hour" == "00" ]]; then
+    export TEMU_REPORT_DATE="yesterday"
+  else
+    export TEMU_REPORT_DATE="today"
+  fi
+fi
+
 audit_log="/Users/vure/ReportDalily/temu-reports/launchd.audit.log"
 lock_dir="/tmp/com.vure.temu-report.lock"
 
@@ -34,5 +43,5 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-log_audit "start: pid=$$ ppid=$PPID pwd=$PWD path=$PATH"
+log_audit "start: pid=$$ ppid=$PPID report_date=$TEMU_REPORT_DATE pwd=$PWD path=$PATH"
 /Users/vure/.nvm/versions/node/v22.22.3/bin/npm run temu:report:all:image

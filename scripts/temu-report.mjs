@@ -560,6 +560,14 @@ async function clickShopSwitchButton(page, shopName) {
       x: rect.x + rect.width / 2,
       y: rect.y + rect.height / 2,
     });
+    const switchButtonCandidates = (root = document) =>
+      Array.from(root.querySelectorAll("button, div, span, a"))
+        .map((node) => ({ node, text: normalizedText(node), rect: node.getBoundingClientRect() }))
+        .filter(({ text, rect, node }) => {
+          if (!isVisible(node)) return false;
+          if (!/^切换\s*[>›»]?$/.test(text)) return false;
+          return rect.width > 0 && rect.height > 0;
+        });
 
     const labels = Array.from(document.querySelectorAll("*"))
       .filter((node) => {
@@ -572,12 +580,8 @@ async function clickShopSwitchButton(page, shopName) {
 
     for (const labelRect of labels) {
       const labelCenter = center(labelRect);
-      const switchButtons = Array.from(document.querySelectorAll("button, div, span, a"))
-        .map((node) => ({ node, text: normalizedText(node), rect: node.getBoundingClientRect() }))
-        .filter(({ text, rect, node }) => {
-          if (!isVisible(node)) return false;
-          if (!/^切换\s*[>›»]?$/.test(text)) return false;
-
+      const switchButtons = switchButtonCandidates()
+        .filter(({ rect }) => {
           const buttonCenter = center(rect);
           const sameRow = Math.abs(buttonCenter.y - labelCenter.y) <= Math.max(56, labelRect.height * 1.5);
           return sameRow && rect.left > labelRect.right;
@@ -586,6 +590,31 @@ async function clickShopSwitchButton(page, shopName) {
 
       const button = switchButtons[0];
       if (button) return center(button.rect);
+    }
+
+    const rows = Array.from(document.querySelectorAll("*"))
+      .filter((node) => {
+        if (!isVisible(node)) return false;
+        const text = normalizedText(node);
+        return text.includes(shopName) && /\b切换\b|切换/.test(text);
+      })
+      .map((node) => ({ node, text: normalizedText(node), rect: node.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.width > 0 && rect.height > 0)
+      .sort((a, b) => a.rect.width * a.rect.height - b.rect.width * b.rect.height);
+
+    for (const row of rows) {
+      const nestedButton = switchButtonCandidates(row.node).sort((a, b) => a.rect.left - b.rect.left)[0];
+      if (nestedButton) return center(nestedButton.rect);
+
+      const rowCenter = center(row.rect);
+      const sameRowButton = switchButtonCandidates()
+        .filter(({ rect }) => {
+          const buttonCenter = center(rect);
+          const sameRow = Math.abs(buttonCenter.y - rowCenter.y) <= Math.max(56, row.rect.height * 1.5);
+          return sameRow && rect.left > row.rect.left;
+        })
+        .sort((a, b) => a.rect.left - b.rect.left)[0];
+      if (sameRowButton) return center(sameRowButton.rect);
     }
 
     return null;
@@ -640,7 +669,7 @@ async function ensureRegion(page) {
   }
 }
 
-async function openProductDataToday(page) {
+async function openProductDataForDate(page) {
   await page.goto(config.temuReportUrl, { waitUntil: "domcontentloaded" });
   await waitSettled(page);
   await assertLoggedIn(page);
@@ -653,20 +682,20 @@ async function openProductDataToday(page) {
   await productReportTab.click({ timeout: 10000 });
   await waitSettled(page);
 
-  let todayClicked = false;
-  let todayActive = false;
-  for (let attempt = 0; attempt < 3 && !todayActive; attempt += 1) {
-    todayClicked = (await clickVisibleExactLabel(page, "今日")) || todayClicked;
-    if (todayClicked) {
+  let filterClicked = false;
+  let filterActive = false;
+  for (let attempt = 0; attempt < 3 && !filterActive; attempt += 1) {
+    filterClicked = (await clickVisibleExactLabel(page, config.reportDateLabel)) || filterClicked;
+    if (filterClicked) {
       await waitSettled(page);
-      todayActive = await isVisibleExactLabelActive(page, "今日", "RD_active");
+      filterActive = await isVisibleExactLabelActive(page, config.reportDateLabel, "RD_active");
     }
   }
-  if (!todayClicked) {
-    fail("TODAY_FILTER_NOT_FOUND", "找不到今日筛选按钮");
+  if (!filterClicked) {
+    fail("DATE_FILTER_NOT_FOUND", `找不到${config.reportDateLabel}筛选按钮`);
   }
-  if (!todayActive) {
-    fail("TODAY_FILTER_NOT_ACTIVE", "今日筛选未处于选中状态");
+  if (!filterActive) {
+    fail("DATE_FILTER_NOT_ACTIVE", `${config.reportDateLabel}筛选未处于选中状态`);
   }
   await waitForTextPattern(page, /件数（全店）|申报价销售额（全店）|净申报价销售额（全店）/, 15000).catch(() =>
     fail("REPORT_TABLE_NOT_READY", "商品数据表格未加载完成"),
@@ -892,8 +921,8 @@ function buildMessage(reports) {
   const updateTimes = [...new Set(reports.map((report) => report.updateTime).filter(Boolean))];
   const sortMetrics = [...new Set(reports.map((report) => report.sortMetricUsed).filter(Boolean))];
   const title = config.accountLabel
-    ? `Temu 欧区今日商品数据（${config.accountLabel}）`
-    : "Temu 欧区今日商品数据";
+    ? `Temu 欧区${config.reportDateLabel}商品数据（${config.accountLabel}）`
+    : `Temu 欧区${config.reportDateLabel}商品数据`;
   return [
     title,
     updateTimes.length ? `更新时间：${updateTimes.join(" / ")}` : null,
@@ -918,7 +947,7 @@ try {
 
   for (const shopName of config.shopNames) {
     await switchShop(activePage, shopName);
-    await openProductDataToday(activePage);
+    await openProductDataForDate(activePage);
 
     const { rows, sortMetricUsed } = await sortBySalesDesc(activePage);
     const pageText = await bodyText(activePage);
@@ -936,7 +965,8 @@ try {
         generatedAt: now.toISOString(),
         accountLabel: config.accountLabel,
         region: config.targetRegion,
-        date: "today",
+        date: config.reportDate,
+        dateLabel: config.reportDateLabel,
         sortMetric: config.sortMetric,
         message,
         shops: reports,

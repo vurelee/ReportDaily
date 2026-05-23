@@ -8,8 +8,20 @@ const accountsPath = process.env.TEMU_ACCOUNTS_CONFIG || path.join(rootDir, "tem
 const reportDir = process.env.TEMU_REPORT_DIR || path.join(rootDir, "temu-reports");
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const combinedJsonPath = path.join(reportDir, `temu-all-accounts-${stamp}.json`);
+const reportDate = normalizeReportDate(process.env.TEMU_REPORT_DATE);
+const reportDateLabels = {
+  today: "今日",
+  yesterday: "昨日",
+};
+const reportDateLabel = reportDateLabels[reportDate];
 
 await fs.mkdir(reportDir, { recursive: true });
+
+function normalizeReportDate(value) {
+  const normalized = String(value || "today").trim().toLowerCase();
+  if (["today", "yesterday"].includes(normalized)) return normalized;
+  throw new Error("TEMU_REPORT_DATE must be today or yesterday");
+}
 
 function briefProductName(value, maxLength = 26) {
   const compact = String(value || "").replace(/\s+/g, " ").trim();
@@ -39,6 +51,7 @@ function runAccount(account) {
       TEMU_SHOPS: account.shops.join(","),
       TEMU_KNOWN_SHOPS: account.knownShops.join(","),
       TEMU_REGION: account.region || process.env.TEMU_REGION || "欧区",
+      TEMU_REPORT_DATE: reportDate,
       TEMU_REPORT_PREFIX: `temu-${account.id}`,
     };
 
@@ -122,7 +135,7 @@ const sortMetrics = [
 ];
 
 const header = [
-  "Temu 欧区今日商品数据",
+  `Temu 欧区${reportDateLabel}商品数据`,
   updateTimes.length ? `更新时间：${updateTimes.join(" / ")}` : null,
   sortMetrics.length ? `排序：${sortMetrics.join(" / ")} 从高到低` : null,
 ].filter((line) => line !== null).join("\n");
@@ -146,6 +159,8 @@ await fs.writeFile(
     {
       generatedAt: new Date().toISOString(),
       accountsPath,
+      reportDate,
+      reportDateLabel,
       message,
       results: results.map((result) =>
         result.ok

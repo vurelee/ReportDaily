@@ -3,6 +3,18 @@ import { fileURLToPath } from "node:url";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+function normalizeReportDate(value) {
+  const normalized = String(value || "today").trim().toLowerCase();
+  if (["today", "yesterday"].includes(normalized)) return normalized;
+  throw new Error("TEMU_REPORT_DATE must be today or yesterday");
+}
+
+const reportDate = normalizeReportDate(process.env.TEMU_REPORT_DATE);
+const reportDateLabels = {
+  today: "今日",
+  yesterday: "昨日",
+};
+
 export const config = {
   rootDir,
   profileDir: process.env.TEMU_PROFILE_DIR || path.join(rootDir, "temu-playwright-profile"),
@@ -13,6 +25,8 @@ export const config = {
   temuHomeUrl: process.env.TEMU_HOME_URL || "https://ads.temu.com/",
   temuReportUrl: process.env.TEMU_REPORT_URL || "https://ads.temu.com/data-report.html",
   targetRegion: process.env.TEMU_REGION || "欧区",
+  reportDate,
+  reportDateLabel: reportDateLabels[reportDate],
   accountLabel: process.env.TEMU_ACCOUNT_LABEL || "",
   reportPrefix: process.env.TEMU_REPORT_PREFIX || "temu-eu-today",
   shopNames: (process.env.TEMU_SHOPS || "SETONR Products,SETONR Origin")

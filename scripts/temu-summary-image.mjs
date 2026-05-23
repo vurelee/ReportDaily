@@ -131,7 +131,16 @@ function latestUpdateTime(report) {
 }
 
 function buildTitle(report) {
-  return `Temu 欧区今日汇总 ${latestUpdateTime(report)}`;
+  return `Temu 欧区${reportDateLabel(report)}汇总 ${latestUpdateTime(report)}`;
+}
+
+function reportDateLabel(report) {
+  if (report.reportDateLabel) return report.reportDateLabel;
+  if (report.dateLabel) return report.dateLabel;
+
+  const reportDate = report.reportDate || report.date;
+  if (reportDate === "yesterday") return "昨日";
+  return "今日";
 }
 
 function parseShanghaiDateTime(value) {
@@ -258,7 +267,7 @@ function buildHtml(rows, report, comparison) {
   const comparisonRows = comparison ? rowsByShop(comparison.rows) : new Map();
   const comparisonText = comparison
     ? `每项百分比对比：${comparison.updateTime}`
-    : "每项百分比对比：未找到昨日同时间数据";
+    : "每项百分比对比：未找到上一日同时间数据";
   const bodyRows = displayRows
     .map((row) => {
       const previous = comparisonRows.get(row.shop);
