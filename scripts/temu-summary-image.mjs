@@ -131,16 +131,7 @@ function latestUpdateTime(report) {
 }
 
 function buildTitle(report) {
-  return `Temu 欧区${reportDateLabel(report)}汇总 ${latestUpdateTime(report)}`;
-}
-
-function reportDateLabel(report) {
-  if (report.reportDateLabel) return report.reportDateLabel;
-  if (report.dateLabel) return report.dateLabel;
-
-  const reportDate = report.reportDate || report.date;
-  if (reportDate === "yesterday") return "昨日";
-  return "今日";
+  return `Temu 欧区今日汇总 ${latestUpdateTime(report)}`;
 }
 
 function parseShanghaiDateTime(value) {
