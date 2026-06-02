@@ -6,6 +6,7 @@ import { connectCdpChrome } from "./chrome-cdp.mjs";
 import { closeCdpChromeProcess, closeCdpPages } from "./cdp-page-cleanup.mjs";
 import { closeTemuPopups } from "./temu-popup-cleaner.mjs";
 import { createTemuNetworkCapture } from "./temu-network-capture.mjs";
+import { ensureConsentChecked } from "./temu-consent-helper.mjs";
 
 const now = new Date();
 const stamp = now.toISOString().replace(/[:.]/g, "-");
@@ -508,61 +509,29 @@ async function tryConfiguredCredentials(page) {
 }
 
 async function clickAuthorizeLogin(page) {
-  const checkedBefore = await page.locator('input[type="checkbox"]').first().isChecked().catch(() => false);
-  if (!checkedBefore) {
-    const consentRect = await page
-      .getByText(/您授权跨境卖家中心/)
-      .first()
-      .boundingBox({ timeout: 5000 })
-      .catch(() => null);
-
-    if (consentRect) {
-      await page.mouse.click(consentRect.x + 8, consentRect.y + 8);
-      await page.waitForTimeout(500);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (!(await ensureConsentChecked(page))) {
+      fail("AUTO_LOGIN_CONSENT_NOT_CHECKED", "授权复选框未成功勾选");
     }
 
-    const checkbox = page.locator('input[type="checkbox"]').first();
-    const checkedAfterClick = await checkbox.isChecked().catch(() => false);
-    if (!checkedAfterClick && (await checkbox.count().catch(() => 0)) > 0) {
-      await checkbox.evaluate((input) => {
-        input.click();
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-      });
-      await page.waitForTimeout(500);
-    }
+    const authButton = page.locator("button").filter({ hasText: /授权登录|登录/ }).last();
+    const clicked =
+      ((await authButton.count().catch(() => 0)) > 0 &&
+        (await authButton.click({ timeout: 5000 }).then(() => true).catch(() => false))) ||
+      (await clickTextByRect(page, "授权登录", (rects) =>
+        rects.sort((a, b) => b.y - a.y)[0] || null,
+      )) ||
+      (await clickTextByRect(page, "登录", (rects) =>
+        rects.sort((a, b) => b.y - a.y)[0] || null,
+      ));
+
+    if (!clicked) fail("AUTO_LOGIN_AUTHORIZE_BUTTON_NOT_FOUND", "找不到授权登录按钮");
+
+    await page.waitForTimeout(2500).catch(() => {});
+    if (page.isClosed()) return;
+    const text = await bodyText(page).catch(() => "");
+    if (!text.includes("授权登录") && !text.includes("手机号登录") && !text.includes("邮箱登录")) return;
   }
-
-  const checked = await page.locator('input[type="checkbox"]').first().isChecked().catch(() => true);
-  if (!checked) {
-    const consentRect = await page
-      .locator("label")
-      .filter({ hasText: /您授权跨境卖家中心/ })
-      .first()
-      .boundingBox({ timeout: 3000 })
-      .catch(() => null);
-
-    if (consentRect) {
-      await page.mouse.click(consentRect.x + 10, consentRect.y + 10);
-      await page.waitForTimeout(500);
-    }
-  }
-
-  const checkedAfter = await page.locator('input[type="checkbox"]').first().isChecked().catch(() => true);
-  if (!checkedAfter) fail("AUTO_LOGIN_CONSENT_NOT_CHECKED", "授权复选框未成功勾选");
-
-  const authButton = page.locator("button").filter({ hasText: "授权登录" }).last();
-  const clicked =
-    ((await authButton.count().catch(() => 0)) > 0 &&
-      (await authButton.click({ timeout: 5000 }).then(() => true).catch(() => false))) ||
-    (await clickTextByRect(page, "授权登录", (rects) =>
-      rects.sort((a, b) => b.y - a.y)[0] || null,
-    )) ||
-    (await clickTextByRect(page, "登录", (rects) =>
-      rects.sort((a, b) => b.y - a.y)[0] || null,
-    ));
-
-  if (!clicked) fail("AUTO_LOGIN_AUTHORIZE_BUTTON_NOT_FOUND", "找不到授权登录按钮");
 }
 
 async function waitForMatchingPage(context, predicate, timeoutMs = 15000) {
@@ -622,6 +591,10 @@ async function attemptAutoLogin(context, page) {
   text = await bodyText(sellerPage);
   if (!text.includes("授权登录") && !text.includes("密码")) {
     fail("AUTO_LOGIN_FORM_NOT_FOUND", "卖家中心登录表单未出现");
+  }
+
+  if (!(await ensureConsentChecked(sellerPage))) {
+    fail("AUTO_LOGIN_CONSENT_NOT_CHECKED", "授权复选框未成功勾选");
   }
 
   const hasCredentials = (await trySavedPasswordAutofill(sellerPage)) || (await tryConfiguredCredentials(sellerPage));

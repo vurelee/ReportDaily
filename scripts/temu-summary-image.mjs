@@ -60,6 +60,19 @@ async function findLatestAbnormalReport() {
   return stats[0]?.filePath || "";
 }
 
+async function findLatestOperationStatusReport() {
+  const entries = await fs.readdir(reportDir);
+  const matches = entries
+    .filter((name) => /^temu-operation-status-.+\.json$/.test(name))
+    .map((name) => path.join(reportDir, name));
+
+  const stats = await Promise.all(
+    matches.map(async (filePath) => ({ filePath, stat: await fs.stat(filePath) })),
+  );
+  stats.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+  return stats[0]?.filePath || "";
+}
+
 function htmlEscape(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -427,8 +440,59 @@ async function loadAbnormalReport() {
   return JSON.parse(await fs.readFile(inputPath, "utf8"));
 }
 
-function buildWecomMarkdown(report, abnormalReport) {
-  return [buildWecomMarkdownTitle(report), buildPartialReportMarkdown(report), buildAbnormalMarkdown(abnormalReport)]
+async function loadOperationStatusReport() {
+  if (!args.includes("--include-operation-status")) return null;
+
+  const selectedPath = getFlagValue("--operation-status-input") || (await findLatestOperationStatusReport());
+  if (!selectedPath) return null;
+
+  const inputPath = path.resolve(selectedPath);
+  return JSON.parse(await fs.readFile(inputPath, "utf8"));
+}
+
+function operationAbnormalSpuIds(shop) {
+  const ids = Array.isArray(shop.newAbnormalSpuIds)
+    ? shop.newAbnormalSpuIds
+    : (shop.missingInSaleProducts || []).map((product) => product.spuId);
+  return [...new Set(ids.map((id) => String(id || "").trim()).filter(Boolean))];
+}
+
+function operationAbnormalSpuMarkdown(shop) {
+  const ids = operationAbnormalSpuIds(shop);
+  if (ids.length === 0) return "-";
+  return `<font color="warning">${ids.join("、")}</font>`;
+}
+
+function buildOperationStatusMarkdown(operationReport) {
+  if (!operationReport) return "";
+
+  const rows = [];
+  for (const result of operationReport.results || []) {
+    if (!result.ok) {
+      rows.push(
+        `${result.account?.label || result.account?.id || "账号"} / - / <font color="warning">检查失败：${result.error || "未知错误"}</font>`,
+      );
+      continue;
+    }
+
+    for (const shop of result.shops || []) {
+      rows.push(
+        `${shop.shopName} / ${shop.inSaleSpuCount || 0} / ${operationAbnormalSpuMarkdown(shop)}`,
+      );
+    }
+  }
+
+  const body = rows.length > 0 ? rows.join("\n") : "暂无巡店结果";
+  return `### 店铺运营状态\n\n**店铺 / 在售SPU数 / 新增异常SPU**\n${body}`;
+}
+
+function buildWecomMarkdown(report, abnormalReport, operationReport) {
+  return [
+    buildWecomMarkdownTitle(report),
+    buildPartialReportMarkdown(report),
+    buildAbnormalMarkdown(abnormalReport),
+    buildOperationStatusMarkdown(operationReport),
+  ]
     .filter(Boolean)
     .join("\n\n");
 }
@@ -925,6 +989,7 @@ async function main() {
   const inputPath = path.resolve(getFlagValue("--input") || (await findLatestCombinedReport()));
   const report = JSON.parse(await fs.readFile(inputPath, "utf8"));
   const abnormalReport = await loadAbnormalReport();
+  const operationStatusReport = await loadOperationStatusReport();
   const rows = collectRows(report);
   const sections = await attachProductImages(collectShopSections(report));
   const comparison = await findComparisonReport(inputPath, report);
@@ -949,7 +1014,7 @@ async function main() {
   let sentWecom = false;
   if (args.includes("--send-wecom") && process.env.TEMU_SEND_WECOM !== "0") {
     try {
-      await sendWecomMarkdown(buildWecomMarkdown(report, abnormalReport));
+      await sendWecomMarkdown(buildWecomMarkdown(report, abnormalReport, operationStatusReport));
       await sendWecomImage(outputPath);
       sentWecom = true;
     } catch (error) {
@@ -961,12 +1026,13 @@ async function main() {
 
   console.log(`Input JSON: ${inputPath}`);
   if (abnormalReport) console.log(`Abnormal JSON: ${path.resolve(getFlagValue("--abnormal-input") || (await findLatestAbnormalReport()))}`);
+  if (operationStatusReport) console.log(`Operation status JSON: ${path.resolve(getFlagValue("--operation-status-input") || (await findLatestOperationStatusReport()))}`);
   if (comparison) console.log(`Comparison JSON: ${comparison.inputPath}`);
   else console.log("Comparison JSON: none");
   console.log(`Saved image: ${outputPath}`);
   if (args.includes("--print-wecom-markdown")) {
     console.log("WeCom markdown:");
-    console.log(buildWecomMarkdown(report, abnormalReport));
+    console.log(buildWecomMarkdown(report, abnormalReport, operationStatusReport));
   }
   if (sentWecom) console.log("Sent Enterprise WeChat markdown title and image.");
 

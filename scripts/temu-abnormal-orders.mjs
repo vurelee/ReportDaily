@@ -7,6 +7,10 @@ import { chromium } from "playwright";
 import { closeCdpChromeProcess, closeCdpPages } from "./cdp-page-cleanup.mjs";
 import { closeTemuPopups } from "./temu-popup-cleaner.mjs";
 import { createTemuNetworkCapture } from "./temu-network-capture.mjs";
+import {
+  consentAppearsChecked as sharedConsentAppearsChecked,
+  ensureConsentChecked as ensureSharedConsentChecked,
+} from "./temu-consent-helper.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const accountsPath = process.env.TEMU_ACCOUNTS_CONFIG || path.join(rootDir, "temu-accounts.json");
@@ -14,6 +18,12 @@ const reportDir = process.env.TEMU_REPORT_DIR || path.join(rootDir, "temu-report
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const targetUrl =
   process.env.TEMU_ABNORMAL_ORDER_URL || "https://agentseller.temu.com/lgst/auth-warehouse/abnormal-order";
+const AGENT_SELLER_ORIGIN = "https://agentseller.temu.com";
+const abnormalSource = String(process.env.TEMU_ABNORMAL_SOURCE || "api").toLowerCase();
+const abnormalApiDomFallback = process.env.TEMU_ABNORMAL_API_DOM_FALLBACK !== "0";
+const ABNORMAL_API_PAGE_SIZE = parsePositiveInteger(process.env.TEMU_ABNORMAL_API_PAGE_SIZE, 10);
+const ABNORMAL_QUERY_TAB_VALUE = 6;
+const ABNORMAL_DISPLAY_ORDER_STATUS = 99;
 const networkCapture = createTemuNetworkCapture({
   kind: "abnormal-orders",
   reportDir,
@@ -36,8 +46,26 @@ function fail(code, message) {
   throw new TemuAbnormalError(code, message);
 }
 
+if (!["api", "dom"].includes(abnormalSource)) {
+  fail("INVALID_ABNORMAL_SOURCE", `TEMU_ABNORMAL_SOURCE 只能是 api 或 dom，当前=${abnormalSource}`);
+}
+
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function parsePositiveInteger(value, fallback) {
+  const parsed = Number.parseInt(String(value || ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function cleanText(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function displayText(value) {
+  const text = cleanText(value);
+  return text || "-";
 }
 
 function safeFilePart(value) {
@@ -184,9 +212,10 @@ async function openCdpSession(account) {
   const browser = await chromium.connectOverCDP(cdpEndpoint(account));
   const context = browser.contexts()[0] || (await browser.newContext());
   const pages = context.pages();
-  const page =
-    pages.find((candidate) => candidate.url().startsWith("https://agentseller.temu.com/")) ||
-    (await context.newPage());
+  const page = process.env.TEMU_FORCE_NEW_CDP_PAGE === "1"
+    ? await context.newPage()
+    : pages.find((candidate) => candidate.url().startsWith("https://agentseller.temu.com/")) ||
+      (await context.newPage());
   return { browser, context, page };
 }
 
@@ -195,10 +224,14 @@ async function bodyText(page, timeout = 10000) {
 }
 
 async function waitSettled(page, usePopupCleaner = true) {
+  if (!page || page.isClosed()) return;
   await page.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => {});
+  if (page.isClosed()) return;
   await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
-  await page.waitForTimeout(600);
-  if (usePopupCleaner && !isSellerCenterShell(page)) await closeTemuPopups(page);
+  if (page.isClosed()) return;
+  await page.waitForTimeout(600).catch(() => {});
+  if (page.isClosed()) return;
+  if (usePopupCleaner && !isSellerCenterShell(page)) await closeTemuPopups(page).catch(() => {});
 }
 
 async function visibleInputMeta(page) {
@@ -307,6 +340,11 @@ async function hasVisiblePasswordInput(page) {
 }
 
 async function ensureConsentChecked(page) {
+  if (await ensureSharedConsentChecked(page).catch(() => false)) {
+    await page.waitForTimeout(500);
+    return true;
+  }
+
   const result = await page.evaluate(() => {
     const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
     const isVisible = (node) => {
@@ -412,6 +450,8 @@ async function ensureConsentChecked(page) {
 }
 
 async function consentAppearsChecked(page) {
+  if (await sharedConsentAppearsChecked(page).catch(() => false)) return true;
+
   return await page.evaluate(() => {
     const isVisible = (node) => {
       const rect = node.getBoundingClientRect();
@@ -463,6 +503,10 @@ async function loginSellerIfNeeded(page) {
   const hasAuthorizeButton = isSellerAuthorizeText(text);
   debugAbnormal(`loginSellerIfNeeded url=${page.url()} loginForm=${hasLoginForm} authorize=${hasAuthorizeButton}`);
   if (!hasLoginForm && !hasAuthorizeButton) return;
+
+  if (!(await ensureConsentChecked(page))) {
+    fail("SELLER_LOGIN_CONSENT_NOT_CHECKED", "卖家中心登录协议复选框未成功勾选");
+  }
 
   const needsPassword = await hasVisiblePasswordInput(page);
   const filled = needsPassword ? (await trySavedPasswordAutofill(page)) || (await tryConfiguredCredentials(page)) : true;
@@ -579,7 +623,8 @@ async function enterSellerCentralIfShown(context, page) {
     fail("SELLER_CENTRAL_CONSENT_NOT_CHECKED", "Seller Central 授权复选框未成功勾选");
   }
   await page.getByText("进入", { exact: true }).first().click({ timeout: 8000 });
-  await page.waitForTimeout(6000);
+  await page.waitForTimeout(6000).catch(() => {});
+  if (page.isClosed()) return null;
 
   const agentPage =
     (await waitForMatchingPage(
@@ -837,6 +882,351 @@ async function agentChinaSellerCenterPoint(page) {
 
 function isNoPermissionPage(text) {
   return /暂无权限|无权限|没有权限|无权访问|该区暂无权限|未开通/.test(text);
+}
+
+function isNoPermissionMessage(value) {
+  return /暂无权限|无权限|没有权限|无权访问|该区暂无权限|未开通|permission/i.test(String(value || ""));
+}
+
+function apiFailureMessage(body) {
+  return body?.errorMsg || body?.error_msg || body?.message || "";
+}
+
+async function agentSellerApiPost(page, endpoint, body = undefined, { mallId } = {}) {
+  const url = endpoint.startsWith("http") ? endpoint : `${AGENT_SELLER_ORIGIN}${endpoint}`;
+  return await page.evaluate(
+    async ({ url, body, hasBody, mallId }) => {
+      async function antiContentValue() {
+        try {
+          if (!window.__codexTemuChunkRequire) {
+            const factories = {};
+            for (const chunk of self["webpackJsonp_bg-agent-seller-lgst"] || []) {
+              const modules = chunk?.[1];
+              if (!modules || typeof modules !== "object") continue;
+              Object.assign(factories, modules);
+            }
+            const cache = {};
+            const chunkRequire = (id) => {
+              const key = String(id);
+              if (cache[key]) return cache[key].exports;
+              const factory = factories[key];
+              if (!factory) throw new Error(`module ${key} not found`);
+              const module = { exports: {} };
+              cache[key] = module;
+              factory.call(module.exports, module, module.exports, chunkRequire);
+              return module.exports;
+            };
+            chunkRequire.d = (exports, definition) => {
+              for (const key of Object.keys(definition)) {
+                if (!Object.prototype.hasOwnProperty.call(exports, key)) {
+                  Object.defineProperty(exports, key, { enumerable: true, get: definition[key] });
+                }
+              }
+            };
+            chunkRequire.o = (object, property) => Object.prototype.hasOwnProperty.call(object, property);
+            chunkRequire.r = (exports) => {
+              if (typeof Symbol !== "undefined" && Symbol.toStringTag) {
+                Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+              }
+              Object.defineProperty(exports, "__esModule", { value: true });
+            };
+            chunkRequire.n = (module) => {
+              const getter = module && module.__esModule ? () => module.default : () => module;
+              chunkRequire.d(getter, { a: getter });
+              return getter;
+            };
+            window.__codexTemuChunkRequire = chunkRequire;
+          }
+          const riskUtil = window.__codexTemuChunkRequire?.(65531);
+          if (typeof riskUtil?.cN === "function") return await riskUtil.cN();
+          if (typeof riskUtil?.xy === "function") return riskUtil.xy();
+        } catch {
+          return "";
+        }
+        return "";
+      }
+
+      const headers = {
+        accept: "application/json, text/plain, */*",
+        "content-type": "application/json",
+      };
+      const antiContent = await antiContentValue();
+      if (antiContent) headers["Anti-Content"] = antiContent;
+      if (mallId) headers.mallid = String(mallId);
+
+      const response = await fetch(url, {
+        method: "POST",
+        credentials: "include",
+        headers,
+        ...(hasBody ? { body: JSON.stringify(body || {}) } : {}),
+      });
+      const text = await response.text();
+      let parsed = null;
+      try {
+        parsed = text ? JSON.parse(text) : null;
+      } catch {
+        parsed = null;
+      }
+      return {
+        ok: response.ok,
+        status: response.status,
+        url: response.url,
+        body: parsed,
+        text: parsed ? "" : text.slice(0, 1000),
+      };
+    },
+    { url, body, hasBody: body !== undefined, mallId },
+  );
+}
+
+function assertAgentSellerApiResponse(response, label) {
+  if (!response?.ok) {
+    fail("API_HTTP_FAILED", `${label} HTTP ${response?.status || "unknown"}：${response?.text || ""}`);
+  }
+
+  const body = response.body;
+  if (!body || typeof body !== "object") {
+    fail("API_RESPONSE_NOT_JSON", `${label} 返回非 JSON：${response.text || ""}`);
+  }
+
+  const errorCode = body.errorCode ?? body.error_code;
+  if (body.success === false || (errorCode !== undefined && Number(errorCode) !== 1000000)) {
+    fail(
+      "API_RESPONSE_FAILED",
+      `${label} 返回失败：code=${errorCode ?? "unknown"} msg=${apiFailureMessage(body) || "unknown"}`,
+    );
+  }
+
+  return body;
+}
+
+async function agentSellerApiResult(page, endpoint, body = undefined, options = {}, label = "Agent Seller API") {
+  const response = await agentSellerApiPost(page, endpoint, body, options);
+  return assertAgentSellerApiResponse(response, label).result || {};
+}
+
+async function abnormalApiMallList(page) {
+  const result = await agentSellerApiResult(page, "/api/seller/auth/userInfo", {}, {}, "店铺列表接口");
+  const malls = result.mallList || [];
+  if (!Array.isArray(malls) || malls.length === 0) {
+    fail("API_MALL_LIST_EMPTY", "店铺列表接口没有返回可切换店铺");
+  }
+  return malls;
+}
+
+function mallInfoForShop(malls, shopName) {
+  const matches = (malls || []).filter((mall) => cleanText(mall.mallName) === shopName);
+  if (matches.length !== 1) {
+    fail("API_SHOP_TARGET_NOT_FOUND", `店铺列表接口中找不到唯一精确店名：${shopName}；匹配数=${matches.length}`);
+  }
+
+  const mall = matches[0];
+  const mallId = String(mall.mallId || "");
+  if (!mallId) fail("API_SHOP_MALL_ID_MISSING", `店铺列表接口中 ${shopName} 缺少 mallId`);
+  return {
+    source: "api",
+    mallId,
+    mallName: cleanText(mall.mallName),
+    managedType: mall.managedType ?? null,
+    mallMode: mall.mallMode ?? null,
+    uniqueId: mall.uniqueId || "",
+  };
+}
+
+function formatShanghaiTimestamp(value) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "-";
+  const millis = timestamp < 1e12 ? timestamp * 1000 : timestamp;
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  })
+    .formatToParts(new Date(millis))
+    .reduce((acc, part) => {
+      acc[part.type] = part.value;
+      return acc;
+    }, {});
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
+function chargeMethodText(value) {
+  const number = Number(value);
+  if (number === 0) return "线上付款";
+  if (number === 1) return "货到付款";
+  return displayText(value);
+}
+
+function tailShippingModeText(value) {
+  const number = Number(value);
+  if (number === 0) return "服务商物流";
+  if (number === 1) return "平台物流";
+  return displayText(value);
+}
+
+function formatEstimatedFreight(tracking) {
+  if (tracking?.estimateFreightCurrency) {
+    return `${displayText(tracking.estimateFreight)} ${tracking.estimateFreightCurrency}`;
+  }
+  return "-";
+}
+
+function formatWarehouseInfo(tracking) {
+  return [
+    ["服务商名称", tracking?.cwProviderName],
+    ["服务商code", tracking?.cwProviderCode],
+    ["仓库名称", tracking?.cwWarehouseName],
+    ["仓库code", tracking?.cwWarehouseCode],
+    ["物流产品编码", Array.isArray(tracking?.lgstServCodes) ? tracking.lgstServCodes.join(",") : tracking?.lgstServCodes],
+  ]
+    .map(([label, value]) => `${label}：${displayText(value)}`)
+    .join(" ");
+}
+
+function formatWaybillInfo(tracking) {
+  return [
+    ["包裹号", tracking?.innerPackageSn || tracking?.packageSn],
+    ["物流商名称", tracking?.carrierService || tracking?.carrierName],
+    ["运单号", tracking?.trackingNumber],
+  ]
+    .map(([label, value]) => `${label}：${displayText(value)}`)
+    .join(" ");
+}
+
+function flattenAbnormalApiRows(resultList) {
+  const rows = [];
+  for (const order of Array.isArray(resultList) ? resultList : []) {
+    const batches = Array.isArray(order?.cwBatchOrderNoShippingInfoDTOList) && order.cwBatchOrderNoShippingInfoDTOList.length > 0
+      ? order.cwBatchOrderNoShippingInfoDTOList
+      : [{}];
+    for (const batch of batches) {
+      const trackingItems = Array.isArray(batch?.trackingNumberInfoDTOList) && batch.trackingNumberInfoDTOList.length > 0
+        ? batch.trackingNumberInfoDTOList
+        : [{}];
+      for (const tracking of trackingItems) {
+        rows.push({
+          sequence: String(rows.length + 1),
+          poNumber: displayText(order?.parentOrderSn),
+          batchOrderNumber: displayText(batch?.batchOrderNo),
+          orderType: chargeMethodText(tracking?.chargeMethod),
+          abnormalReason: displayText(tracking?.orderFailReason || tracking?.displayOrderStatusDes),
+          operationGuide: displayText(tracking?.suggestion),
+          warehouseInfo: formatWarehouseInfo(tracking),
+          waybillInfo: formatWaybillInfo(tracking),
+          destination: displayText(order?.regionZhName1),
+          lastMileMode: tailShippingModeText(tracking?.tailShippingMode),
+          itemCount: displayText(tracking?.quantity),
+          skuCount: displayText(tracking?.skuNum),
+          estimatedFreight: formatEstimatedFreight(tracking),
+          createdAt: formatShanghaiTimestamp(order?.createdAt),
+          orderedAt: formatShanghaiTimestamp(tracking?.shippingTime || tracking?.firstRequestTime),
+          outboundAt: formatShanghaiTimestamp(tracking?.outboundTime),
+        });
+      }
+    }
+  }
+  return rows;
+}
+
+async function abnormalApiOrderPage(page, mallId, pageNo) {
+  const request = {
+    pageNo,
+    pageSize: ABNORMAL_API_PAGE_SIZE,
+    queryTabValue: ABNORMAL_QUERY_TAB_VALUE,
+    displayOrderStatusList: [ABNORMAL_DISPLAY_ORDER_STATUS],
+  };
+  const result = await agentSellerApiResult(
+    page,
+    "/api/bg/cw/order/pageCwNormalOrderShippingInfo",
+    request,
+    { mallId },
+    `异常明细接口 page=${pageNo}`,
+  );
+  return { request, result };
+}
+
+async function collectAbnormalReportByApi(page, shopName, apiMalls) {
+  const apiSwitch = mallInfoForShop(apiMalls, shopName);
+  networkCapture.mark("abnormal:shop-selected", {
+    shopName,
+    source: "api",
+    mallId: apiSwitch.mallId,
+  });
+
+  let sumResult;
+  let firstPage;
+  try {
+    sumResult = await agentSellerApiResult(
+      page,
+      "/api/bg/cw/order/queryAbnormalOrderSum",
+      {},
+      { mallId: apiSwitch.mallId },
+      `${shopName} 异常数量接口`,
+    );
+    firstPage = await abnormalApiOrderPage(page, apiSwitch.mallId, 1);
+  } catch (error) {
+    if (isNoPermissionMessage(errorMessage(error))) {
+      return {
+        shopName,
+        currentShopName: shopName,
+        source: "direct-api",
+        apiSwitch,
+        hasPermission: false,
+        abnormalCount: null,
+        tabCount: null,
+        rows: [],
+        reason: "NO_PERMISSION",
+        reasonText: "当前店铺无权限访问出库单异常页",
+      };
+    }
+    throw error;
+  }
+
+  const abnormalCount = Number.parseInt(String(sumResult.abnormalOrderSum ?? "0"), 10);
+  const totalCount = Number.parseInt(String(firstPage.result.totalCount ?? "0"), 10);
+  if (Number.isFinite(abnormalCount) && Number.isFinite(totalCount) && abnormalCount !== totalCount) {
+    fail("API_ABNORMAL_COUNT_MISMATCH", `${shopName} 异常数量=${abnormalCount}，明细总数=${totalCount}`);
+  }
+
+  const pageResults = [firstPage.result];
+  const totalPages = Math.ceil(totalCount / ABNORMAL_API_PAGE_SIZE);
+  for (let pageNo = 2; pageNo <= totalPages; pageNo += 1) {
+    pageResults.push((await abnormalApiOrderPage(page, apiSwitch.mallId, pageNo)).result);
+  }
+
+  const rawRows = pageResults.flatMap((result) => (Array.isArray(result.resultList) ? result.resultList : []));
+  const rows = flattenAbnormalApiRows(rawRows);
+  return {
+    shopName,
+    currentShopName: shopName,
+    source: "direct-api",
+    apiSwitch,
+    hasPermission: true,
+    abnormalCount: totalCount,
+    tabCount: abnormalCount,
+    rows,
+    apiReport: {
+      source: "direct-api",
+      endpoints: {
+        mallList: `${AGENT_SELLER_ORIGIN}/api/seller/auth/userInfo`,
+        abnormalSum: `${AGENT_SELLER_ORIGIN}/api/bg/cw/order/queryAbnormalOrderSum`,
+        rows: `${AGENT_SELLER_ORIGIN}/api/bg/cw/order/pageCwNormalOrderShippingInfo`,
+      },
+      request: {
+        mallId: apiSwitch.mallId,
+        pageSize: ABNORMAL_API_PAGE_SIZE,
+        queryTabValue: ABNORMAL_QUERY_TAB_VALUE,
+        displayOrderStatusList: [ABNORMAL_DISPLAY_ORDER_STATUS],
+      },
+      rawOrderCount: rawRows.length,
+      rowCount: rows.length,
+    },
+  };
 }
 
 function disambiguateExactShopMatches(candidates) {
@@ -1138,24 +1528,62 @@ async function runAccount(account) {
     accountLabel: account.label || account.id,
     shops,
     targetUrl,
+    abnormalSource,
   });
   const { browser, context, page } = await connectCdpChrome(account, targetUrl);
   networkCapture.attach(context);
   try {
     let activePage = await ensureTargetPage(context, page);
+    let apiMalls = null;
+    if (abnormalSource === "api") {
+      try {
+        apiMalls = await abnormalApiMallList(activePage);
+      } catch (error) {
+        if (!abnormalApiDomFallback) throw error;
+        console.error(`Abnormal API mall list failed, falling back to DOM: ${account.label || account.id}: ${errorMessage(error)}`);
+        networkCapture.mark("abnormal:api-fallback-dom", {
+          accountId: account.id,
+          accountLabel: account.label || account.id,
+          error: errorMessage(error),
+        });
+      }
+    }
+
     const shopReports = [];
     for (const shopName of shops) {
       networkCapture.mark("abnormal:shop-start", {
         accountId: account.id,
         accountLabel: account.label || account.id,
         shopName,
+        abnormalSource,
       });
-      activePage = await switchShop(context, activePage, shopName, knownShops);
-      const report = await extractAbnormalReport(activePage, shopName, knownShops);
+      let report;
+      if (abnormalSource === "api" && apiMalls) {
+        try {
+          report = await collectAbnormalReportByApi(activePage, shopName, apiMalls);
+        } catch (error) {
+          if (!abnormalApiDomFallback) throw error;
+          console.error(`Abnormal API collection failed, falling back to DOM: ${shopName}: ${errorMessage(error)}`);
+          networkCapture.mark("abnormal:api-fallback-dom", {
+            accountId: account.id,
+            accountLabel: account.label || account.id,
+            shopName,
+            error: errorMessage(error),
+          });
+        }
+      }
+
+      if (!report) {
+        activePage = await switchShop(context, activePage, shopName, knownShops);
+        report = await extractAbnormalReport(activePage, shopName, knownShops);
+        report.source = report.source || "dom";
+      }
+
       networkCapture.mark("abnormal:extracted", {
         accountId: account.id,
         accountLabel: account.label || account.id,
         shopName,
+        source: report.source || "dom",
         hasPermission: report.hasPermission,
         abnormalCount: report.abnormalCount,
         rowCount: report.rows?.length || 0,
@@ -1179,7 +1607,15 @@ async function runAccount(account) {
       await closeCdpPages(context);
     }
     networkCapture.detach(context);
-    await browser.close().catch(() => {});
+    if (process.env.TEMU_CLOSE_CHROME_PROCESS === "0") {
+      try {
+        browser.disconnect();
+      } catch {
+        // The parent runner owns the shared CDP Chrome lifecycle.
+      }
+    } else {
+      await browser.close().catch(() => {});
+    }
     await closeCdpChromeProcess(account.cdpPort);
   }
 }
@@ -1218,6 +1654,8 @@ await fs.writeFile(
       generatedAt: new Date().toISOString(),
       accountsPath,
       targetUrl,
+      abnormalSource,
+      abnormalApiDomFallback,
       message,
       results,
     },

@@ -8,7 +8,7 @@
     "temu:login:cdp": "node scripts/temu-login-cdp.mjs",
     "temu:report": "node scripts/temu-report.mjs",
     "temu:report:all": "node scripts/temu-run-all.mjs",
-    "temu:report:all:image": "node scripts/temu-run-all.mjs && if [ \"${TEMU_REPORT_DATE:-today}\" = \"today\" ]; then node scripts/temu-abnormal-orders.mjs; node scripts/temu-summary-image.mjs --send-wecom --include-abnormal; else node scripts/temu-summary-image.mjs --send-wecom; fi",
+    "temu:report:all:image": "node scripts/temu-report-all-image-flow.mjs",
     "temu:report:api": "TEMU_PRODUCT_SOURCE=api TEMU_ACCOUNT_RETRY_ATTEMPTS=1 node scripts/temu-run-all.mjs",
     "temu:report:api:capture": "TEMU_PRODUCT_SOURCE=api TEMU_CAPTURE_NETWORK=1 TEMU_ACCOUNT_RETRY_ATTEMPTS=1 node scripts/temu-run-all.mjs",
     "temu:report:capture": "TEMU_CAPTURE_NETWORK=1 TEMU_ACCOUNT_RETRY_ATTEMPTS=1 node scripts/temu-run-all.mjs",
@@ -16,6 +16,10 @@
     "temu:report:codex:today": "TEMU_REPORT_DATE=today scripts/run-codex-temu-report.sh",
     "temu:report:codex:yesterday": "TEMU_REPORT_DATE=yesterday scripts/run-codex-temu-report.sh",
     "temu:abnormal": "node scripts/temu-abnormal-orders.mjs",
+    "temu:agentseller-checks": "node scripts/temu-run-agentseller-checks.mjs",
+    "temu:operation-status": "node scripts/temu-operation-status.mjs",
+    "temu:operation-status:markdown": "node scripts/temu-operation-status-markdown.mjs",
+    "temu:operation-status:image": "node scripts/temu-operation-status-image.mjs",
     "temu:abnormal:capture": "TEMU_CAPTURE_NETWORK=1 node scripts/temu-abnormal-orders.mjs"
   },
   "dependencies": {

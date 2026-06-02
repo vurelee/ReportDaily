@@ -30,6 +30,17 @@ export async function sendWecomMarkdown(markdown) {
   });
 }
 
+export async function sendWecomMarkdownV2(markdown) {
+  if (!config.wecomWebhookUrl) {
+    throw new Error("WECOM_WEBHOOK_URL is required to send Enterprise WeChat webhook messages");
+  }
+
+  await sendWecomWebhook({
+    msgtype: "markdown_v2",
+    markdown_v2: { content: markdown },
+  });
+}
+
 export async function sendWecomImage(imagePath) {
   if (!config.wecomWebhookUrl) {
     throw new Error("WECOM_WEBHOOK_URL is required to send Enterprise WeChat images");
