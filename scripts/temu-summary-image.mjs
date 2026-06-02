@@ -137,14 +137,18 @@ function collectShopSections(report) {
 
 function shopMetricSummary(shop) {
   const total = shop.total || shop.rows?.[0] || {};
+  const netQuantity = total.netQuantity || total.quantity || "0";
+  const netSales = total.netSales || total.displaySales || total.sales || "￥0.00";
   return {
     shop: shop.shopName || "",
     totalCost: total.totalCost || "￥0.00",
-    netQuantity: total.netQuantity || total.quantity || "0",
-    netSales: total.netSales || total.displaySales || total.sales || "￥0.00",
+    netQuantity,
+    netSales,
     impressions: total.impressions || "0",
     ctr: total.ctr || "",
     cvr: total.cvr || "",
+    quantityValue: parseInteger(netQuantity),
+    amountValue: parseCurrency(netSales),
   };
 }
 
@@ -632,7 +636,7 @@ function buildHtml(sections, rows, report, comparison, inputPath) {
         <div>点击率</div>
         <div>转化率</div>
       </div>
-      <div class="products">${sections.map(shopSectionHtml).join("")}</div>
+      <div class="products">${sections.map((section) => shopSectionHtml(section, comparisonRows)).join("")}</div>
     </div>`;
 
   return `<!doctype html>
@@ -719,6 +723,7 @@ function buildHtml(sections, rows, report, comparison, inputPath) {
           }
           .total-card .delta {
             flex: 0 0 auto;
+            margin-top: 0;
             padding: 4px 7px;
             font-size: 14px;
             line-height: 17px;
@@ -789,8 +794,8 @@ function buildHtml(sections, rows, report, comparison, inputPath) {
             text-align: right;
           }
           .shop-subtotal {
-            min-height: 44px;
-            padding: 7px 14px;
+            min-height: 62px;
+            padding: 8px 14px;
             background: #e8edf4;
             border-bottom: 1px solid #d3dbe6;
             border-top: 1px solid #d9e1eb;
@@ -844,6 +849,21 @@ function buildHtml(sections, rows, report, comparison, inputPath) {
           .shop-subtotal .metric-cell {
             font-size: 14px;
             font-weight: 900;
+            overflow: visible;
+          }
+          .metric-main {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
+          .shop-subtotal .delta {
+            margin-top: 4px;
+            padding: 0;
+            border-radius: 0;
+            background: transparent;
+            font-size: 11px;
+            line-height: 14px;
+            font-weight: 850;
           }
         </style>
       </head>
@@ -860,14 +880,21 @@ function buildHtml(sections, rows, report, comparison, inputPath) {
     </html>`;
 }
 
-function shopSectionHtml(section) {
+function shopSectionHtml(section, comparisonRows = new Map()) {
   const summary = section.summary;
+  const previous = comparisonRows.get(summary.shop);
   return `
     <section class="shop-section">
       <div class="shop-subtotal">
         <div class="subtotal-shop">${htmlEscape(summary.shop)}</div>
-        <div class="metric-cell">${htmlEscape(summary.netQuantity)}</div>
-        <div class="metric-cell">${htmlEscape(summary.netSales)}</div>
+        <div class="metric-cell">
+          <div class="metric-main">${htmlEscape(summary.netQuantity)}</div>
+          ${deltaHtml(percentChange(summary.quantityValue, previous?.quantityValue))}
+        </div>
+        <div class="metric-cell">
+          <div class="metric-main">${htmlEscape(summary.netSales)}</div>
+          ${deltaHtml(percentChange(summary.amountValue, previous?.amountValue))}
+        </div>
       </div>
       ${section.products.map(productHtml).join("")}
     </section>`;
@@ -909,7 +936,7 @@ async function main() {
   const browser = await launchBrowser();
   try {
     const page = await browser.newPage({
-      viewport: { width: reportWidth + 40, height: 250 + sections.length * 44 + productCount * 56 },
+      viewport: { width: reportWidth + 40, height: 270 + sections.length * 64 + productCount * 56 },
       deviceScaleFactor: 1,
     });
     await page.setContent(buildHtml(sections, rows, report, comparison, inputPath), { waitUntil: "load" });
