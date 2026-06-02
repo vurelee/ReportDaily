@@ -68,6 +68,11 @@ function chromeArgs(url) {
     `--user-data-dir=${config.cdpProfileDir}`,
     "--no-first-run",
     "--no-default-browser-check",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-features=CalculateNativeWinOcclusion",
+    "--window-size=1440,1000",
     url,
   ];
 }

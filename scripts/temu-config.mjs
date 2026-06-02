@@ -9,6 +9,12 @@ function normalizeReportDate(value) {
   throw new Error("TEMU_REPORT_DATE must be today or yesterday");
 }
 
+function normalizeProductSource(value) {
+  const normalized = String(value || "dom").trim().toLowerCase();
+  if (["dom", "api"].includes(normalized)) return normalized;
+  throw new Error("TEMU_PRODUCT_SOURCE must be dom or api");
+}
+
 const reportDate = normalizeReportDate(process.env.TEMU_REPORT_DATE);
 const reportDateLabels = {
   today: "今日",
@@ -27,6 +33,8 @@ export const config = {
   targetRegion: process.env.TEMU_REGION || "欧区",
   reportDate,
   reportDateLabel: reportDateLabels[reportDate],
+  productSource: normalizeProductSource(process.env.TEMU_PRODUCT_SOURCE),
+  apiDomFallback: process.env.TEMU_API_DOM_FALLBACK !== "0",
   accountLabel: process.env.TEMU_ACCOUNT_LABEL || "",
   reportPrefix: process.env.TEMU_REPORT_PREFIX || "temu-eu-today",
   shopNames: (process.env.TEMU_SHOPS || "SETONR Products,SETONR Origin")

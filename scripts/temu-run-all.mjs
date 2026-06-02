@@ -9,6 +9,8 @@ const reportDir = process.env.TEMU_REPORT_DIR || path.join(rootDir, "temu-report
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const combinedJsonPath = path.join(reportDir, `temu-all-accounts-${stamp}.json`);
 const reportDate = normalizeReportDate(process.env.TEMU_REPORT_DATE);
+const productSource = String(process.env.TEMU_PRODUCT_SOURCE || "dom").trim().toLowerCase();
+const apiDomFallback = process.env.TEMU_API_DOM_FALLBACK !== "0";
 const reportDateLabels = {
   today: "今日",
   yesterday: "昨日",
@@ -41,7 +43,16 @@ function formatShopSummary(shopReport) {
   ].join("\n");
 }
 
-function runAccount(account) {
+function positiveInteger(value, fallback) {
+  const parsed = Number.parseInt(String(value || ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function accountAttemptLimit(account) {
+  return positiveInteger(account.retryAttempts || process.env.TEMU_ACCOUNT_RETRY_ATTEMPTS, 2);
+}
+
+function runAccountOnce(account) {
   return new Promise((resolve) => {
     const env = {
       ...process.env,
@@ -71,12 +82,14 @@ function runAccount(account) {
     });
     child.on("close", async (code) => {
       const savedJson = stdout.match(/Saved JSON:\s*(.+)\s*$/m)?.[1]?.trim() || "";
-      if (code !== 0 || !savedJson) {
+      const networkCapturePath = stdout.match(/Network capture:\s*(.+)\s*$/m)?.[1]?.trim() || "";
+      if (!savedJson) {
         resolve({
           account,
           ok: false,
           stdout,
           stderr,
+          networkCapturePath,
           error: summarizeError(stdout, stderr, code),
         });
         return;
@@ -84,18 +97,61 @@ function runAccount(account) {
 
       try {
         const report = JSON.parse(await fs.readFile(savedJson, "utf8"));
-        resolve({ account, ok: true, stdout, stderr, jsonPath: savedJson, report });
+        const shopCount = report.shops?.length || 0;
+        const failures = report.failures || [];
+        const failed = code !== 0 || report.partial === true || failures.length > 0 || shopCount === 0;
+        resolve({
+          account,
+          ok: !failed,
+          partial: failed && shopCount > 0,
+          stdout,
+          stderr,
+          jsonPath: savedJson,
+          networkCapturePath,
+          report,
+          error: failures.map((failure) => `${failure.shopName}: ${failure.error}`).join(" / ") || (code === 0 ? "" : summarizeError(stdout, stderr, code)),
+        });
       } catch (error) {
         resolve({
           account,
           ok: false,
           stdout,
           stderr,
+          networkCapturePath,
           error: `无法读取账号报告 JSON：${error instanceof Error ? error.message : String(error)}`,
         });
       }
     });
   });
+}
+
+async function runAccount(account) {
+  const maxAttempts = accountAttemptLimit(account);
+  const previousErrors = [];
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const result = await runAccountOnce(account);
+    if (result.ok || attempt === maxAttempts) {
+      return {
+        ...result,
+        attempts: attempt,
+        previousErrors,
+      };
+    }
+
+    previousErrors.push(result.error || `attempt ${attempt} failed`);
+    console.error(
+      `Retrying account: ${account.label || account.id} attempt ${attempt + 1}/${maxAttempts}: ${result.error || "unknown error"}`,
+    );
+  }
+
+  return {
+    account,
+    ok: false,
+    attempts: maxAttempts,
+    previousErrors,
+    error: previousErrors[previousErrors.length - 1] || "account retry failed",
+  };
 }
 
 function summarizeError(stdout, stderr, code) {
@@ -118,17 +174,17 @@ for (const account of accountConfig.accounts || []) {
   results.push(await runAccount(account));
 }
 
-const successfulReports = results.filter((result) => result.ok).map((result) => result.report);
+const reportsWithData = results.filter((result) => result.report?.shops?.length > 0).map((result) => result.report);
 const updateTimes = [
   ...new Set(
-    successfulReports.flatMap((report) =>
+    reportsWithData.flatMap((report) =>
       report.shops.map((shop) => shop.updateTime).filter(Boolean),
     ),
   ),
 ];
 const sortMetrics = [
   ...new Set(
-    successfulReports.flatMap((report) =>
+    reportsWithData.flatMap((report) =>
       report.shops.map((shop) => shop.sortMetricUsed).filter(Boolean),
     ),
   ),
@@ -141,13 +197,17 @@ const header = [
 ].filter((line) => line !== null).join("\n");
 
 const accountBlocks = results.map((result) => {
-    if (!result.ok) {
+    if (!result.report?.shops?.length) {
       return [`【账号：${result.account.label || result.account.id}】`, `失败：${result.error}`].join("\n");
     }
 
+    const failureLines = (result.report.failures || []).map(
+      (failure) => `【${failure.shopName}】\n失败：${failure.error}`,
+    );
     return [
       `【账号：${result.account.label || result.account.id}】`,
       result.report.shops.map(formatShopSummary).join("\n\n"),
+      ...failureLines,
     ].join("\n");
   });
 
@@ -161,18 +221,28 @@ await fs.writeFile(
       accountsPath,
       reportDate,
       reportDateLabel,
+      productSource,
+      apiDomFallback,
       message,
       results: results.map((result) =>
-        result.ok
+        result.report
           ? {
               account: result.account,
-              ok: true,
+              ok: result.ok,
+              partial: result.partial === true,
+              attempts: result.attempts || 1,
+              previousErrors: result.previousErrors || [],
               jsonPath: result.jsonPath,
+              networkCapturePath: result.networkCapturePath || "",
               report: result.report,
+              error: result.error || "",
             }
           : {
               account: result.account,
               ok: false,
+              attempts: result.attempts || 1,
+              previousErrors: result.previousErrors || [],
+              networkCapturePath: result.networkCapturePath || "",
               error: result.error,
             },
       ),

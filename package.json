@@ -8,8 +8,15 @@
     "temu:login:cdp": "node scripts/temu-login-cdp.mjs",
     "temu:report": "node scripts/temu-report.mjs",
     "temu:report:all": "node scripts/temu-run-all.mjs",
-    "temu:report:all:image": "node scripts/temu-run-all.mjs && if [ \"${TEMU_REPORT_DATE:-today}\" = \"today\" ]; then node scripts/temu-abnormal-orders.mjs || true; node scripts/temu-summary-image.mjs --send-wecom --include-abnormal; else node scripts/temu-summary-image.mjs --send-wecom; fi",
-    "temu:abnormal": "node scripts/temu-abnormal-orders.mjs"
+    "temu:report:all:image": "node scripts/temu-run-all.mjs && if [ \"${TEMU_REPORT_DATE:-today}\" = \"today\" ]; then node scripts/temu-abnormal-orders.mjs; node scripts/temu-summary-image.mjs --send-wecom --include-abnormal; else node scripts/temu-summary-image.mjs --send-wecom; fi",
+    "temu:report:api": "TEMU_PRODUCT_SOURCE=api TEMU_ACCOUNT_RETRY_ATTEMPTS=1 node scripts/temu-run-all.mjs",
+    "temu:report:api:capture": "TEMU_PRODUCT_SOURCE=api TEMU_CAPTURE_NETWORK=1 TEMU_ACCOUNT_RETRY_ATTEMPTS=1 node scripts/temu-run-all.mjs",
+    "temu:report:capture": "TEMU_CAPTURE_NETWORK=1 TEMU_ACCOUNT_RETRY_ATTEMPTS=1 node scripts/temu-run-all.mjs",
+    "temu:report:codex": "scripts/run-codex-temu-report.sh",
+    "temu:report:codex:today": "TEMU_REPORT_DATE=today scripts/run-codex-temu-report.sh",
+    "temu:report:codex:yesterday": "TEMU_REPORT_DATE=yesterday scripts/run-codex-temu-report.sh",
+    "temu:abnormal": "node scripts/temu-abnormal-orders.mjs",
+    "temu:abnormal:capture": "TEMU_CAPTURE_NETWORK=1 node scripts/temu-abnormal-orders.mjs"
   },
   "dependencies": {
     "playwright": "^1.52.0"

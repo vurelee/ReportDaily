@@ -20,6 +20,22 @@ if [[ -z "${TEMU_REPORT_DATE:-}" ]]; then
   fi
 fi
 
+if [[ -z "${TEMU_PRODUCT_SOURCE:-}" ]]; then
+  export TEMU_PRODUCT_SOURCE="api"
+fi
+
+case "$TEMU_PRODUCT_SOURCE" in
+  dom|api) ;;
+  *)
+    echo "TEMU_PRODUCT_SOURCE must be dom or api; got: $TEMU_PRODUCT_SOURCE" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -z "${TEMU_API_DOM_FALLBACK:-}" ]]; then
+  export TEMU_API_DOM_FALLBACK="1"
+fi
+
 audit_log="/Users/vure/ReportDalily/temu-reports/launchd.audit.log"
 lock_dir="/tmp/com.vure.temu-report.lock"
 
@@ -27,6 +43,27 @@ mkdir -p /Users/vure/ReportDalily/temu-reports
 
 log_audit() {
   /bin/date "+%Y-%m-%d %H:%M:%S %Z %z | $*" >> "$audit_log"
+}
+
+reset_cdp_chrome_ports() {
+  for port in 9222 9223; do
+    local pids
+    pids="$(/usr/sbin/lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+    if [[ -z "$pids" ]]; then
+      continue
+    fi
+
+    local pid_list
+    pid_list="$(printf "%s" "$pids" | tr '\n' ',')"
+    log_audit "preflight: reset_cdp port=$port pids=$pid_list"
+    while IFS= read -r pid; do
+      if [[ -n "$pid" ]]; then
+        /bin/kill "$pid" 2>/dev/null || true
+      fi
+    done <<< "$pids"
+  done
+
+  /bin/sleep 2
 }
 
 if ! /bin/mkdir "$lock_dir" 2>/dev/null; then
@@ -43,5 +80,19 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-log_audit "start: pid=$$ ppid=$PPID report_date=$TEMU_REPORT_DATE pwd=$PWD path=$PATH"
-/Users/vure/.nvm/versions/node/v22.22.3/bin/npm run temu:report:all:image
+log_audit "start: pid=$$ ppid=$PPID report_date=$TEMU_REPORT_DATE product_source=$TEMU_PRODUCT_SOURCE api_dom_fallback=$TEMU_API_DOM_FALLBACK pwd=$PWD path=$PATH"
+
+wake_delay="${TEMU_LAUNCHD_WAKE_DELAY_SECONDS:-25}"
+if ! [[ "$wake_delay" =~ '^[0-9]+$' ]]; then
+  wake_delay=25
+fi
+
+if [[ "${TEMU_LAUNCHD_WAKE_DISPLAY:-1}" != "0" ]]; then
+  log_audit "preflight: wake_display delay=${wake_delay}s"
+  /usr/bin/caffeinate -u -t "$wake_delay" >/dev/null 2>&1 || true
+fi
+
+reset_cdp_chrome_ports
+
+log_audit "run: caffeinate npm temu:report:all:image product_source=$TEMU_PRODUCT_SOURCE"
+/usr/bin/caffeinate -d -i -m /Users/vure/.nvm/versions/node/v22.22.3/bin/npm run temu:report:all:image

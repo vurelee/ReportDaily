@@ -1,17 +1,29 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { sendWecomImage, sendWecomMarkdown } from "./wecom-send.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const reportDir = process.env.TEMU_REPORT_DIR || path.join(rootDir, "temu-reports");
+const productImageDir = process.env.TEMU_PRODUCT_IMAGE_DIR || path.join(reportDir, "product-images");
 const args = process.argv.slice(2);
 const reportWidth = 780;
+const productImageFetchTimeoutMs = positiveInteger(
+  process.env.TEMU_PRODUCT_IMAGE_FETCH_TIMEOUT_MS,
+  12000,
+);
+const productDetailLimit = positiveInteger(process.env.TEMU_PRODUCT_DETAIL_LIMIT, 5);
 
 function getFlagValue(name) {
   const index = args.indexOf(name);
   return index === -1 ? "" : args[index + 1] || "";
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number.parseInt(String(value || ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 async function findCombinedReportPaths() {
@@ -56,35 +68,106 @@ function htmlEscape(value) {
     .replaceAll('"', "&quot;");
 }
 
-function collectRows(report) {
-  const rows = [];
-
-  for (const result of report.results || []) {
-    if (!result.ok) {
-      throw new Error(`${result.account?.label || result.account?.id || "account"} failed: ${result.error}`);
-    }
-
-    for (const shop of result.report?.shops || []) {
-      const total = shop.total || shop.rows?.[0] || {};
-      const amount = total.displaySales || total.netSales || total.sales || "￥0.00";
-      const quantityValue = parseInteger(total.quantity);
-      const amountValue = parseCurrency(amount);
-      rows.push({
-        shop: shop.shopName,
-        updateTime: shop.updateTime || "",
-        quantity: String(quantityValue),
-        quantityValue,
-        amount: formatCurrency(amountValue),
-        amountValue,
-      });
-    }
+function reportResults(report) {
+  if (Array.isArray(report.results)) return report.results;
+  if (Array.isArray(report.shops)) {
+    return [
+      {
+        account: { label: report.accountLabel || "" },
+        ok: report.ok !== false,
+        partial: report.partial === true,
+        report,
+        error: "",
+      },
+    ];
   }
+  return [];
+}
+
+function shopSummaryRow(shop) {
+  const total = shop.total || shop.rows?.[0] || {};
+  const amount = total.displaySales || total.netSales || total.sales || "￥0.00";
+  const quantityValue = parseInteger(total.quantity);
+  const amountValue = parseCurrency(amount);
+  return {
+    shop: shop.shopName,
+    updateTime: shop.updateTime || "",
+    quantity: String(quantityValue),
+    quantityValue,
+    amount: formatCurrency(amountValue),
+    amountValue,
+  };
+}
+
+function collectRows(report) {
+  const rows = reportResults(report).flatMap((result) =>
+    (result.report?.shops || []).map(shopSummaryRow),
+  );
 
   if (rows.length === 0) {
     throw new Error("No shop summary rows found in report");
   }
 
   return rows;
+}
+
+function collectShopSections(report) {
+  const sections = [];
+
+  for (const result of reportResults(report)) {
+    for (const shop of result.report?.shops || []) {
+      const products = (shop.rows || [])
+        .filter((row) => String(row.productId || "").trim())
+        .map((row) => productRow(row))
+        .filter((row) => row.amountValue > 0)
+        .sort((a, b) => b.amountValue - a.amountValue)
+        .slice(0, productDetailLimit);
+      if (products.length > 0) {
+        sections.push({ summary: shopMetricSummary(shop), products });
+      }
+    }
+  }
+
+  if (sections.length === 0) {
+    throw new Error("No shop sections found in report");
+  }
+
+  return sections;
+}
+
+function shopMetricSummary(shop) {
+  const total = shop.total || shop.rows?.[0] || {};
+  return {
+    shop: shop.shopName || "",
+    totalCost: total.totalCost || "￥0.00",
+    netQuantity: total.netQuantity || total.quantity || "0",
+    netSales: total.netSales || total.displaySales || total.sales || "￥0.00",
+    impressions: total.impressions || "0",
+    ctr: total.ctr || "",
+    cvr: total.cvr || "",
+  };
+}
+
+function productRow(row) {
+  const amount = row.displaySales || row.netSales || row.sales || "￥0.00";
+  const quantityValue = parseInteger(row.quantity);
+  const amountValue = parseCurrency(amount);
+  return {
+    productId: String(row.productId || ""),
+    imageUrl: productImageUrl(row),
+    totalCost: row.totalCost || "￥0.00",
+    netQuantity: row.netQuantity || row.quantity || "0",
+    netSales: row.netSales || row.displaySales || row.sales || "￥0.00",
+    impressions: row.impressions || "0",
+    ctr: row.ctr || "",
+    cvr: row.cvr || "",
+    quantityValue,
+    amountValue,
+  };
+}
+
+function productImageUrl(row) {
+  return String(row.imageUrl || row.goodsImageUrl || row.raw?.goods_image_url || "").trim();
 }
 
 function parseInteger(value) {
@@ -102,6 +185,68 @@ function formatCurrency(value) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
+}
+
+function imageExtensionFromUrl(imageUrl) {
+  try {
+    const ext = path.extname(new URL(imageUrl).pathname).toLowerCase();
+    if ([".jpg", ".jpeg", ".png", ".webp"].includes(ext)) return ext;
+  } catch {
+    return ".jpg";
+  }
+  return ".jpg";
+}
+
+function imageMimeFromExtension(ext) {
+  if (ext === ".png") return "image/png";
+  if (ext === ".webp") return "image/webp";
+  return "image/jpeg";
+}
+
+async function cachedImageDataUri(imageUrl, cache = new Map()) {
+  const url = String(imageUrl || "").trim();
+  if (!/^https?:\/\//i.test(url)) return "";
+  if (cache.has(url)) return cache.get(url);
+
+  const ext = imageExtensionFromUrl(url);
+  const digest = createHash("sha256").update(url).digest("hex").slice(0, 32);
+  const imagePath = path.join(productImageDir, `${digest}${ext}`);
+
+  try {
+    await fs.access(imagePath);
+  } catch {
+    await fs.mkdir(productImageDir, { recursive: true });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), productImageFetchTimeoutMs);
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari/537.36",
+      },
+    }).finally(() => clearTimeout(timeout));
+    if (!response.ok) {
+      cache.set(url, "");
+      return "";
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    await fs.writeFile(imagePath, buffer);
+  }
+
+  const buffer = await fs.readFile(imagePath);
+  const dataUri = `data:${imageMimeFromExtension(ext)};base64,${buffer.toString("base64")}`;
+  cache.set(url, dataUri);
+  return dataUri;
+}
+
+async function attachProductImages(sections) {
+  const cache = new Map();
+  for (const section of sections) {
+    for (const product of section.products) {
+      product.imageDataUri = await cachedImageDataUri(product.imageUrl, cache);
+    }
+  }
+  return sections;
 }
 
 function appendTotalRow(rows) {
@@ -150,7 +295,7 @@ function comparisonRowsByShop(currentRows, comparison) {
 }
 
 function latestUpdateDate(report) {
-  const dates = (report.results || [])
+  const dates = reportResults(report)
     .flatMap((result) => result.report?.shops || [])
     .map((shop) => parseShanghaiDateTime(shop.updateTime))
     .filter(Boolean)
@@ -172,8 +317,8 @@ function buildTitle(report) {
   return `Temu 欧区${reportDateLabel(report)}汇总 ${latestUpdateTime(report)}`;
 }
 
-function buildImageTitle(report) {
-  return `欧区销量汇总 ${actualSalesDate(report)}`;
+function buildImageTitleWithTime(report, inputPath) {
+  return `欧区销量汇总 ${actualSalesDateTime(report, inputPath)}`;
 }
 
 function reportDateLabel(report) {
@@ -185,13 +330,29 @@ function reportDateLabel(report) {
   return "今日";
 }
 
-function actualSalesDate(report) {
-  const baseDate = reportGeneratedDate(report) || latestUpdateDate(report);
-  if (!baseDate) return formatShanghaiDate(new Date());
+function actualSalesDateTime(report, inputPath = "") {
+  const baseDate = reportStartDate(report, inputPath) || latestUpdateDate(report);
+  if (!baseDate) return formatShanghaiSecond(new Date());
 
   const offsetDays = isYesterdayReport(report) ? -1 : 0;
   const actualDate = new Date(baseDate.getTime() + offsetDays * 24 * 60 * 60 * 1000);
-  return formatShanghaiDate(actualDate);
+  return formatShanghaiSecond(actualDate);
+}
+
+function reportStartDate(report, inputPath = "") {
+  return reportStartDateFromPath(inputPath) || reportGeneratedDate(report);
+}
+
+function reportStartDateFromPath(inputPath = "") {
+  const filename = path.basename(String(inputPath || ""));
+  const match = filename.match(
+    /^temu-all-accounts-(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.json$/,
+  );
+  if (!match) return null;
+
+  const [, dateHour, minute, second, millisecond] = match;
+  const date = new Date(`${dateHour}:${minute}:${second}.${millisecond}Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function reportGeneratedDate(report) {
@@ -225,7 +386,7 @@ function buildAbnormalMarkdown(abnormalReport) {
   for (const result of abnormalReport.results || []) {
     if (!result.ok) {
       warningLines.push(
-        `${result.account?.label || result.account?.id || "账号"} 出库单异常读取失败：${result.error || "未知错误"}`,
+        `${result.account?.label || result.account?.id || "账号"} 出库单异常附加检查未完成，不影响销售汇总：${result.error || "未知错误"}`,
       );
       continue;
     }
@@ -263,9 +424,26 @@ async function loadAbnormalReport() {
 }
 
 function buildWecomMarkdown(report, abnormalReport) {
-  return [buildWecomMarkdownTitle(report), buildAbnormalMarkdown(abnormalReport)]
+  return [buildWecomMarkdownTitle(report), buildPartialReportMarkdown(report), buildAbnormalMarkdown(abnormalReport)]
     .filter(Boolean)
     .join("\n\n");
+}
+
+function buildPartialReportMarkdown(report) {
+  const lines = [];
+  for (const result of reportResults(report)) {
+    if (result.partial) {
+      lines.push(`${result.account?.label || result.account?.id || "账号"} 部分店铺采集失败，已发送成功店铺数据。`);
+    } else if (!result.ok) {
+      lines.push(`${result.account?.label || result.account?.id || "账号"} 采集失败：${result.error || "未知错误"}`);
+    }
+
+    for (const failure of result.report?.failures || []) {
+      lines.push(`${failure.shopName} 采集失败：${failure.error || "未知错误"}`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 function parseShanghaiDateTime(value) {
@@ -296,6 +474,7 @@ function formatShanghaiParts(date) {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit",
     hour12: false,
   }).formatToParts(date);
   return Object.fromEntries(parts.map((part) => [part.type, part.value]));
@@ -309,6 +488,16 @@ function formatShanghaiDate(date) {
 function formatShanghaiMinute(date) {
   const value = formatShanghaiParts(date);
   return `${value.year}-${value.month}-${value.day} ${value.hour}:${value.minute}`;
+}
+
+function formatShanghaiSecond(date) {
+  const value = formatShanghaiParts(date);
+  return `${value.year}-${value.month}-${value.day} ${value.hour}:${value.minute}:${value.second}`;
+}
+
+function formatShanghaiTime(date) {
+  const value = formatShanghaiParts(date);
+  return `${value.hour}:${value.minute}:${value.second}`;
 }
 
 async function findComparisonReport(inputPath, report) {
@@ -398,30 +587,53 @@ function deltaHtml(change) {
   }</span>${htmlEscape(change.text)}</span>`;
 }
 
-function buildHtml(rows, report, comparison) {
-  const displayRows = appendTotalRow(rows);
-  const comparisonRows = comparisonRowsByShop(rows, comparison);
-  const comparisonText = "对比日期为上一日";
-  const bodyRows = displayRows
-    .map((row) => {
-      const previous = comparisonRows.get(row.shop);
-      const quantityDelta = percentChange(row.quantityValue, previous?.quantityValue);
-      const amountDelta = percentChange(row.amountValue, previous?.amountValue);
+function comparisonSubtitle(comparison, report, inputPath) {
+  const comparisonDate = comparison
+    ? reportStartDate(comparison.report, comparison.inputPath) || latestUpdateDate(comparison.report)
+    : reportStartDate(report, inputPath);
+  return `对比日期：上一日 ${comparisonDate ? formatShanghaiTime(comparisonDate) : "--:--:--"}`;
+}
 
-      return `
-        <tr${row.isTotal ? ' class="total-row"' : ""}>
-          <td class="shop">${htmlEscape(row.shop)}</td>
-          <td class="metric quantity">
-            <div class="value">${htmlEscape(row.quantity)}</div>
-            ${deltaHtml(quantityDelta)}
-          </td>
-          <td class="metric amount">
-            <div class="value">${htmlEscape(row.amount)}</div>
-            ${deltaHtml(amountDelta)}
-          </td>
-        </tr>`;
-    })
-    .join("");
+function buildHtml(sections, rows, report, comparison, inputPath) {
+  const displayRows = appendTotalRow(rows);
+  const grandTotal = displayRows.find((row) => row.isTotal);
+  const comparisonRows = comparisonRowsByShop(rows, comparison);
+  const comparisonText = comparisonSubtitle(comparison, report, inputPath);
+
+  const grandPrevious = grandTotal ? comparisonRows.get(grandTotal.shop) : null;
+  const grandTotalHtml = grandTotal
+    ? `
+      <div class="grand-total">
+        <div class="total-card">
+          <div class="total-label">总件数（合计）</div>
+          <div class="total-line">
+            <div class="total-value">${htmlEscape(grandTotal.quantity)}</div>
+            ${deltaHtml(percentChange(grandTotal.quantityValue, grandPrevious?.quantityValue))}
+          </div>
+        </div>
+        <div class="total-card">
+          <div class="total-label">总销售额（合计）</div>
+          <div class="total-line">
+            <div class="total-value">${htmlEscape(grandTotal.amount)}</div>
+            ${deltaHtml(percentChange(grandTotal.amountValue, grandPrevious?.amountValue))}
+          </div>
+        </div>
+      </div>`
+    : "";
+
+  const productTableHtml = `
+    <div class="product-table">
+      <div class="product-header">
+        <div>商品图</div>
+        <div>总花费</div>
+        <div>净件数</div>
+        <div>净销售额</div>
+        <div>曝光量</div>
+        <div>点击率</div>
+        <div>转化率</div>
+      </div>
+      <div class="products">${sections.map(shopSectionHtml).join("")}</div>
+    </div>`;
 
   return `<!doctype html>
     <html>
@@ -466,111 +678,216 @@ function buildHtml(rows, report, comparison) {
             color: #707782;
             white-space: nowrap;
           }
-          table {
-            width: 100%;
-            border-collapse: collapse;
-            table-layout: fixed;
-          }
-          th {
-            height: 50px;
-            padding: 0 20px;
-            background: #f7f8fa;
-            color: #4c535c;
-            font-size: 20px;
-            font-weight: 750;
-            text-align: left;
+          .grand-total {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 16px;
+            padding: 18px 20px;
+            background: #fff;
             border-bottom: 1px solid #e8ebf0;
           }
-          td {
-            height: 76px;
-            padding: 0 20px;
-            border-bottom: 1px solid #eceef2;
-            vertical-align: middle;
-          }
-          tr:last-child td {
-            border-bottom: none;
-          }
-          .shop {
-            width: 345px;
-            font-size: 22px;
-            font-weight: 650;
-            color: #24272c;
-            white-space: nowrap;
+          .total-card {
+            min-height: 118px;
+            padding: 20px 22px;
+            border: 1px solid #dfe6ef;
+            border-radius: 8px;
+            background: #f8fafc;
             overflow: hidden;
-            text-overflow: ellipsis;
           }
-          .quantity {
-            width: 150px;
-            text-align: right;
-          }
-          .amount {
-            width: 285px;
-            text-align: right;
-          }
-          th.quantity,
-          th.amount {
-            text-align: right;
-          }
-          .value {
-            font-size: 24px;
-            line-height: 30px;
-            font-weight: 780;
-            color: #171a1f;
-            white-space: nowrap;
-          }
-          .delta {
-            display: inline-flex;
-            align-items: center;
-            justify-content: flex-end;
-            gap: 4px;
-            margin-top: 3px;
+          .total-label {
+            color: #667085;
             font-size: 17px;
             line-height: 22px;
             font-weight: 760;
             white-space: nowrap;
           }
+          .total-line {
+            display: flex;
+            flex-wrap: nowrap;
+            align-items: flex-end;
+            gap: 8px;
+            margin-top: 26px;
+            min-width: 0;
+          }
+          .total-value {
+            color: #101828;
+            font-size: 32px;
+            line-height: 36px;
+            font-weight: 900;
+            white-space: nowrap;
+            max-width: 100%;
+          }
+          .total-card .delta {
+            flex: 0 0 auto;
+            padding: 4px 7px;
+            font-size: 14px;
+            line-height: 17px;
+          }
+          .shop-section {
+            border-bottom: 1px solid #e8ebf0;
+          }
+          .shop-section:last-child {
+            border-bottom: none;
+          }
+          .delta {
+            display: inline-flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 5px;
+            padding: 5px 8px;
+            border-radius: 6px;
+            font-size: 16px;
+            line-height: 19px;
+            font-weight: 820;
+            white-space: nowrap;
+          }
           .delta .arrow {
-            font-size: 12px;
-            line-height: 14px;
+            font-size: 10px;
+            line-height: 12px;
             transform: translateY(-1px);
           }
           .delta.up {
             color: #13a538;
+            background: #e8f7ed;
           }
           .delta.down {
             color: #f04438;
+            background: #fee4e2;
           }
           .delta.flat {
             color: #89909b;
+            background: #eef1f5;
           }
-          .total-row td {
-            background: #fbfcfd;
+          .product-table {
+            border-top: 1px solid #e8ebf0;
           }
-          .total-row .shop,
-          .total-row .value {
+          .product-header,
+          .product-row,
+          .shop-subtotal {
+            display: grid;
+            grid-template-columns: repeat(7, minmax(0, 1fr));
+            column-gap: 0;
+            align-items: center;
+          }
+          .product-header > div,
+          .product-row > div,
+          .shop-subtotal > div {
+            min-width: 0;
+            padding: 0 6px;
+          }
+          .product-header {
+            min-height: 38px;
+            padding: 0 14px;
+            background: #f7f8fa;
+            border-bottom: 1px solid #eceef2;
+            color: #59616c;
+            font-size: 13px;
+            line-height: 16px;
+            font-weight: 780;
+          }
+          .product-header div:nth-child(n + 2) {
+            text-align: right;
+          }
+          .shop-subtotal {
+            min-height: 44px;
+            padding: 7px 14px;
+            background: #e8edf4;
+            border-bottom: 1px solid #d3dbe6;
+            border-top: 1px solid #d9e1eb;
+          }
+          .subtotal-shop {
+            grid-column: 1 / span 2;
+            color: #171a1f;
+            font-size: 15px;
+            line-height: 18px;
             font-weight: 850;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
+          .product-row {
+            min-height: 54px;
+            padding: 6px 14px;
+            border-bottom: 1px solid #f0f2f5;
+          }
+          .product-row:last-child {
+            border-bottom: none;
+          }
+          .thumb,
+          .thumb-placeholder {
+            width: 42px;
+            height: 42px;
+            border: 1px solid #e5e8ee;
+            background: #f4f6f8;
+          }
+          .thumb {
+            object-fit: cover;
+          }
+          .thumb-placeholder {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #a0a7b2;
+            font-size: 12px;
+            font-weight: 700;
+          }
+          .metric-cell {
+            text-align: right;
+            color: #202328;
+            font-size: 14px;
+            line-height: 17px;
+            font-weight: 780;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
+          .shop-subtotal .metric-cell {
+            font-size: 14px;
+            font-weight: 900;
           }
         </style>
       </head>
       <body>
         <div class="report">
           <div class="header">
-            <div class="title">${htmlEscape(buildImageTitle(report))}</div>
+            <div class="title">${htmlEscape(buildImageTitleWithTime(report, inputPath))}</div>
             <div class="sub">${htmlEscape(comparisonText)}</div>
           </div>
-          <table>
-            <thead>
-              <tr>
-                <th class="shop">店铺</th>
-                <th class="quantity">件数</th>
-                <th class="amount">销售额</th>
-              </tr>
-            </thead>
-            <tbody>${bodyRows}</tbody>
-          </table>
+          ${grandTotalHtml}
+          ${productTableHtml}
         </div>
       </body>
     </html>`;
+}
+
+function shopSectionHtml(section) {
+  const summary = section.summary;
+  return `
+    <section class="shop-section">
+      <div class="shop-subtotal">
+        <div class="subtotal-shop">${htmlEscape(summary.shop)}</div>
+        <div class="metric-cell">${htmlEscape(summary.netQuantity)}</div>
+        <div class="metric-cell">${htmlEscape(summary.netSales)}</div>
+      </div>
+      ${section.products.map(productHtml).join("")}
+    </section>`;
+}
+
+function productHtml(product) {
+  const imageHtml = product.imageDataUri
+    ? `<img class="thumb" src="${htmlEscape(product.imageDataUri)}" />`
+    : `<div class="thumb-placeholder">图</div>`;
+
+  return `
+    <div class="product-row">
+      <div>${imageHtml}</div>
+      <div class="metric-cell">${htmlEscape(product.totalCost)}</div>
+      <div class="metric-cell">${htmlEscape(product.netQuantity)}</div>
+      <div class="metric-cell">${htmlEscape(product.netSales)}</div>
+      <div class="metric-cell">${htmlEscape(product.impressions)}</div>
+      <div class="metric-cell">${htmlEscape(product.ctr)}</div>
+      <div class="metric-cell">${htmlEscape(product.cvr)}</div>
+    </div>`;
 }
 
 async function main() {
@@ -582,18 +899,20 @@ async function main() {
   const report = JSON.parse(await fs.readFile(inputPath, "utf8"));
   const abnormalReport = await loadAbnormalReport();
   const rows = collectRows(report);
+  const sections = await attachProductImages(collectShopSections(report));
   const comparison = await findComparisonReport(inputPath, report);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outputPath =
     getFlagValue("--output") || path.join(reportDir, `temu-summary-${stamp}.png`);
+  const productCount = sections.reduce((sum, section) => sum + section.products.length, 0);
 
   const browser = await launchBrowser();
   try {
     const page = await browser.newPage({
-      viewport: { width: reportWidth + 40, height: 140 + (rows.length + 1) * 76 },
+      viewport: { width: reportWidth + 40, height: 250 + sections.length * 44 + productCount * 56 },
       deviceScaleFactor: 1,
     });
-    await page.setContent(buildHtml(rows, report, comparison), { waitUntil: "load" });
+    await page.setContent(buildHtml(sections, rows, report, comparison, inputPath), { waitUntil: "load" });
     await page.locator(".report").screenshot({ path: outputPath });
   } finally {
     await browser.close();
