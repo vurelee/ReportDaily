@@ -6,7 +6,6 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 
 const checks = [
   ["abnormal-orders", "scripts/temu-abnormal-orders.mjs"],
-  ["price-adjust-reject", "scripts/temu-price-adjust-reject.mjs", ["--reject"]],
   ["operation-status", "scripts/temu-operation-status.mjs"],
 ];
 
