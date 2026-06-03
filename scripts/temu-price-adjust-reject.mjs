@@ -13,11 +13,20 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const accountsPath = process.env.TEMU_ACCOUNTS_CONFIG || path.join(rootDir, "temu-accounts.json");
 const reportDir = process.env.TEMU_REPORT_DIR || path.join(rootDir, "temu-reports");
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-const targetUrl =
-  process.env.TEMU_PRICE_ADJUST_URL || "https://agentseller.temu.com/main/adjust-price-manage/order-price";
+const agentSellerOrigin = "https://agentseller.temu.com";
+const agentSellerEntryUrl =
+  process.env.TEMU_PRICE_ADJUST_ENTRY_URL ||
+  process.env.TEMU_AGENTSELLER_ENTRY_URL ||
+  `${agentSellerOrigin}/goods/list`;
 const rejectReason = "0";
 const shouldReject = process.argv.includes("--reject") || process.env.TEMU_PRICE_ADJUST_REJECT === "1";
 const pageSettleMs = positiveInteger(process.env.TEMU_PRICE_ADJUST_SETTLE_MS, 1200);
+const priceAdjustPageSize = positiveInteger(process.env.TEMU_PRICE_ADJUST_PAGE_SIZE, 200);
+const priceAdjustMaxPages = positiveInteger(process.env.TEMU_PRICE_ADJUST_MAX_PAGES, 100);
+const priceAdjustPollCount = positiveInteger(process.env.TEMU_PRICE_ADJUST_POLL_COUNT, 8);
+const priceAdjustPollMs = positiveInteger(process.env.TEMU_PRICE_ADJUST_POLL_MS, 1500);
+const priceAdjustPageQueryApi = "/api/kiana/magnus/mms/price-adjust/page-query";
+const priceAdjustBatchReviewApi = "/api/kiana/magnus/mms/price-adjust/batch-review";
 
 await fs.mkdir(reportDir, { recursive: true });
 
@@ -158,7 +167,7 @@ async function resetCdpChrome(account) {
   }
 }
 
-async function ensureCdpChrome(account, url = targetUrl) {
+async function ensureCdpChrome(account, url = agentSellerEntryUrl) {
   if (await isCdpReady(account)) return;
   launchWithOpen(account, url);
   try {
@@ -169,7 +178,7 @@ async function ensureCdpChrome(account, url = targetUrl) {
   }
 }
 
-async function connectCdpChrome(account, url = targetUrl) {
+async function connectCdpChrome(account, url = agentSellerEntryUrl) {
   await ensureCdpChrome(account, url);
   try {
     return await openCdpSession(account);
@@ -452,8 +461,8 @@ async function agentChinaSellerCenterPoint(page) {
   });
 }
 
-function isAgentSellerShell(page, text) {
-  return page.url().startsWith("https://agentseller.temu.com/") && text.includes("TEMU Agent Center");
+function isAgentSellerApiPage(page) {
+  return page.url().startsWith(`${agentSellerOrigin}/`) && !page.url().startsWith(`${agentSellerOrigin}/auth/authentication`);
 }
 
 function isSellerCenterShell(page) {
@@ -463,21 +472,21 @@ function isSellerCenterShell(page) {
 function preferredAgentSellerPage(context, fallbackPage) {
   const pages = [...context.pages()].reverse().filter((candidate) => !candidate.isClosed());
   return (
-    pages.find((candidate) => candidate.url().startsWith(targetUrl)) ||
+    pages.find((candidate) => candidate.url().startsWith(agentSellerEntryUrl)) ||
     pages.find(
       (candidate) =>
-        candidate.url().startsWith("https://agentseller.temu.com/") &&
-        !candidate.url().startsWith("https://agentseller.temu.com/auth/authentication"),
+        candidate.url().startsWith(`${agentSellerOrigin}/`) &&
+        !candidate.url().startsWith(`${agentSellerOrigin}/auth/authentication`),
     ) ||
     pages.find((candidate) => candidate.url().startsWith("https://seller.kuajingmaihuo.com/")) ||
-    pages.find((candidate) => candidate.url().startsWith("https://agentseller.temu.com/auth/authentication")) ||
+    pages.find((candidate) => candidate.url().startsWith(`${agentSellerOrigin}/auth/authentication`)) ||
     (fallbackPage && !fallbackPage.isClosed() ? fallbackPage : pages[0])
   );
 }
 
-async function ensureTargetPage(context, page) {
+async function ensureAgentSellerPage(context, page) {
   let activePage = page;
-  await activePage.goto(targetUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
+  await activePage.goto(agentSellerEntryUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
   await waitSettled(activePage);
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -486,7 +495,7 @@ async function ensureTargetPage(context, page) {
     await waitSettled(activePage);
 
     const text = await bodyText(activePage);
-    if (activePage.url().startsWith(targetUrl) && text.includes("价格申报视角")) return activePage;
+    if (isAgentSellerApiPage(activePage) && !isSellerLoginFormText(text) && !isSellerAuthorizeText(text)) return activePage;
 
     const authenticatedPage = await enterAgentAuthenticationIfShown(context, activePage);
     if (authenticatedPage) {
@@ -500,158 +509,14 @@ async function ensureTargetPage(context, page) {
     activePage = preferredAgentSellerPage(context, activePage);
     await waitSettled(activePage);
 
-    if (isAgentSellerShell(activePage, await bodyText(activePage)) || isSellerCenterShell(activePage)) {
-      await activePage.goto(targetUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
+    if (isAgentSellerApiPage(activePage) || isSellerCenterShell(activePage)) {
+      await activePage.goto(agentSellerEntryUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
       await waitSettled(activePage);
     }
   }
 
-  await captureDiagnostics(activePage, "target-page-not-ready").catch(() => "");
-  fail("PRICE_ADJUST_PAGE_NOT_READY", "完成登录/授权后仍未进入调价管理页");
-}
-
-function disambiguateExactShopMatches(candidates) {
-  const unique = [...new Set(candidates.filter(Boolean))];
-  if (unique.length <= 1) return unique[0] || "";
-  const longest = [...unique].sort((a, b) => b.length - a.length)[0];
-  return unique.every((name) => name === longest || longest.includes(name)) ? longest : "";
-}
-
-async function currentShopName(page, knownShops) {
-  const names = await page.evaluate((knownShops) => {
-    const visibleText = (node) => (node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
-    const shopLabelText = (text) => String(text || "").replace(/\s+/g, " ").trim().replace(/\s*(半托管|全托管)\s*$/, "");
-    const isVisible = (node) => {
-      const rect = node.getBoundingClientRect();
-      const style = window.getComputedStyle(node);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    };
-    const visibleNodes = Array.from(document.querySelectorAll("*")).filter(isVisible);
-    const currentRow = visibleNodes.map(visibleText).find((text) => /(当前登录店铺|当前店铺)/.test(text));
-    if (currentRow) {
-      const current = knownShops.find((shopName) => currentRow.includes(shopName));
-      if (current) return [current];
-    }
-    const exactMatches = knownShops.filter((shopName) => visibleNodes.some((node) => visibleText(node) === shopName));
-    if (exactMatches.length > 0) return exactMatches;
-    return knownShops.filter((shopName) =>
-      visibleNodes.some((node) => shopLabelText(visibleText(node)) === shopName),
-    );
-  }, knownShops);
-  return disambiguateExactShopMatches(names);
-}
-
-async function isShopSwitcherOpen(page, knownShops) {
-  return await page.evaluate((knownShops) => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-    const isVisible = (node) => {
-      const rect = node.getBoundingClientRect();
-      const style = window.getComputedStyle(node);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    };
-    const visibleTexts = Array.from(document.querySelectorAll("*")).filter(isVisible).map((node) => clean(node.innerText || node.textContent || ""));
-    const visibleCount = knownShops.filter((name) =>
-      visibleTexts.some((text) => text === name || text.replace(/\s*(半托管|全托管)\s*$/, "") === name),
-    ).length;
-    return visibleTexts.some((text) => text === "切换店铺" || text.startsWith("切换店铺 ")) || visibleCount >= 2;
-  }, knownShops).catch(() => false);
-}
-
-async function clickVisibleTextPoint(page, targetText) {
-  const point = await page.evaluate((targetText) => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-    const shopLabelText = (value) => clean(value).replace(/\s*(半托管|全托管)\s*$/, "");
-    const isVisible = (node) => {
-      const rect = node.getBoundingClientRect();
-      const style = window.getComputedStyle(node);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    };
-    const candidates = Array.from(document.querySelectorAll("button, a, div, span"))
-      .filter(isVisible)
-      .map((node) => ({ text: clean(node.innerText || node.textContent || ""), rect: node.getBoundingClientRect() }))
-      .filter(({ text, rect }) => rect.width <= 360 && rect.height <= 100 && (text === targetText || shopLabelText(text) === targetText))
-      .sort((a, b) => a.rect.top - b.rect.top || b.rect.right - a.rect.right);
-    const match = candidates[0];
-    return match ? { x: match.rect.x + match.rect.width / 2, y: match.rect.y + match.rect.height / 2 } : null;
-  }, targetText);
-  if (!point) return false;
-  await clickCdpPoint(page, point.x, point.y);
-  return true;
-}
-
-async function openShopSwitcher(page, knownShops) {
-  if (await isShopSwitcherOpen(page, knownShops)) return;
-  const current = await currentShopName(page, knownShops);
-  if (!current) fail("SHOP_CURRENT_UNKNOWN", "无法识别当前店铺");
-  if (!(await clickVisibleTextPoint(page, current))) {
-    await page.getByText(current, { exact: true }).last().click({ timeout: 8000 });
-  }
-  await page.waitForTimeout(500);
-  if (!(await clickVisibleTextPoint(page, "切换"))) {
-    await page.getByText("切换", { exact: true }).last().click({ timeout: 8000 });
-  }
-  await page.waitForTimeout(1000);
-}
-
-async function clickShopSwitchButton(page, shopName) {
-  const clickPoint = await page.evaluate((shopName) => {
-    const normalizedText = (node) => (node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
-    const shopLabelText = (node) => normalizedText(node).replace(/\s*(半托管|全托管)\s*$/, "");
-    const isVisible = (node) => {
-      const rect = node.getBoundingClientRect();
-      const style = window.getComputedStyle(node);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    };
-    const center = (rect) => ({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 });
-    const switchButtonCandidates = (root = document) =>
-      Array.from(root.querySelectorAll("button, div, span, a"))
-        .map((node) => ({ node, text: normalizedText(node), rect: node.getBoundingClientRect() }))
-        .filter(({ text, rect, node }) => isVisible(node) && /^切换\s*[>›»]?$/.test(text) && rect.width > 0 && rect.height > 0);
-    const labelNodes = Array.from(document.querySelectorAll("*"))
-      .filter((node) => isVisible(node) && shopLabelText(node) === shopName)
-      .sort((a, b) => {
-        const aRect = a.getBoundingClientRect();
-        const bRect = b.getBoundingClientRect();
-        return aRect.width * aRect.height - bRect.width * bRect.height;
-      });
-    for (const labelNode of labelNodes) {
-      labelNode.scrollIntoView({ block: "center", inline: "nearest" });
-      const labelRect = labelNode.getBoundingClientRect();
-      const labelCenter = center(labelRect);
-      const button = switchButtonCandidates()
-        .filter(({ rect }) => Math.abs(center(rect).y - labelCenter.y) <= Math.max(56, labelRect.height * 1.5) && rect.left > labelRect.right)
-        .sort((a, b) => a.rect.left - b.rect.left)[0];
-      if (button) return center(button.rect);
-    }
-    return null;
-  }, shopName);
-  if (!clickPoint) return false;
-  await clickCdpPoint(page, clickPoint.x, clickPoint.y);
-  return true;
-}
-
-async function switchShop(context, page, shopName, knownShops) {
-  let activePage = page;
-  const current = await currentShopName(activePage, knownShops);
-  if (current !== shopName) {
-    await openShopSwitcher(activePage, knownShops);
-    if (!(await clickShopSwitchButton(activePage, shopName))) {
-      fail("SHOP_TARGET_NOT_FOUND", `店铺切换列表中找不到精确店名：${shopName}`);
-    }
-    await waitSettled(activePage);
-  }
-  await activePage.goto(targetUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
-  await waitSettled(activePage);
-  activePage = preferredAgentSellerPage(context, activePage);
-  const after = await currentShopName(activePage, knownShops);
-  if (after !== shopName) {
-    fail("SHOP_SWITCH_VERIFY_FAILED", `切换后店铺不匹配；目标=${shopName}，当前=${after || "unknown"}`);
-  }
-  return activePage;
-}
-
-function isPriceAdjustPageReady(text) {
-  return text.includes("价格申报视角") && text.includes("待卖家确认");
+  await captureDiagnostics(activePage, "agentseller-page-not-ready").catch(() => "");
+  fail("PRICE_ADJUST_AGENTSELLER_NOT_READY", "完成登录/授权后仍未进入可调用 API 的 AgentSeller 页面");
 }
 
 async function captureDiagnostics(page, reason) {
@@ -671,260 +536,463 @@ async function captureDiagnostics(page, reason) {
   return jsonOutputPath;
 }
 
-async function clickConfirmingTab(page) {
-  await page.getByText(/待卖家确认\(\d+\)/).first().click({ timeout: 8000 }).catch(async () => {
-    await page.getByText("待卖家确认").first().click({ timeout: 8000 });
-  });
-  await waitSettled(page);
+function getPriceAdjustPageResult(responseBody) {
+  return responseBody?.result || responseBody || {};
 }
 
-async function extractPendingRowsFromDom(page) {
-  return await page.evaluate(() => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-    const isVisible = (node) => {
-      const rect = node.getBoundingClientRect();
-      const style = window.getComputedStyle(node);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    };
-    const table = Array.from(document.querySelectorAll("table"))
-      .filter(isVisible)
-      .find((candidate) => {
-        const text = clean(candidate.innerText || candidate.textContent);
-        return text.includes("单号") && text.includes("货品信息") && text.includes("调整后申报价格");
-      });
-    if (!table) return [];
-    const rowNodes = Array.from(table.querySelectorAll("tr")).filter((row) => {
-      const text = clean(row.innerText || row.textContent);
-      return /^HJD\d+/.test(text) && text.includes("商品调价");
-    });
-    return rowNodes.map((row) => {
-      const text = clean(row.innerText || row.textContent);
-      const orderSn = text.match(/HJD\d+/)?.[0] || "";
-      const skcId = text.match(/SKC ID[:：]\s*(\d+)/)?.[1] || "";
-      const productName = text
-        .replace(orderSn, "")
-        .replace(/SKC ID[:：]\s*\d+.*/, "")
-        .trim();
-      return { orderSn, skcId, productName, rowText: text.slice(0, 1000) };
-    }).filter((row) => row.orderSn);
-  });
+function getPriceAdjustPageRows(responseBody) {
+  const result = getPriceAdjustPageResult(responseBody);
+  for (const candidate of [
+    result.pageItems,
+    result.dataList,
+    result.list,
+    result.records,
+    result.items,
+    result.orderList,
+    result.submitOrders,
+  ]) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+  return [];
 }
 
-async function selectVisiblePendingRows(page) {
-  return await page.evaluate(() => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-    const isVisible = (node) => {
-      const rect = node.getBoundingClientRect();
-      const style = window.getComputedStyle(node);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    };
-    const clicked = [];
-    const rows = Array.from(document.querySelectorAll("tr")).filter((row) => {
-      const text = clean(row.innerText || row.textContent);
-      return /^HJD\d+/.test(text) && text.includes("商品调价");
-    });
-    for (const row of rows) {
-      const checkbox = Array.from(row.querySelectorAll('[role="checkbox"], input[type="checkbox"], [class*="checkbox"], [class*="Checkbox"], [class*="CBX"]'))
-        .filter(isVisible)
-        .find((node) => {
-          const rect = node.getBoundingClientRect();
-          return rect.width <= 40 && rect.height <= 40;
-        });
-      if (!checkbox) continue;
-      const aria = checkbox.getAttribute("aria-checked");
-      const checked = checkbox instanceof HTMLInputElement
-        ? checkbox.checked
-        : aria === "true" || /checked|selected|active/i.test(String(checkbox.className || ""));
-      if (!checked) {
-        const rect = checkbox.getBoundingClientRect();
-        const x = rect.left + rect.width / 2;
-        const y = rect.top + rect.height / 2;
-        const target = document.elementFromPoint(x, y) || checkbox;
-        target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-        target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-        target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-        if (typeof target.click === "function") target.click();
-      }
-      clicked.push(clean(row.innerText || row.textContent).match(/HJD\d+/)?.[0] || "");
-    }
-    return clicked.filter(Boolean);
-  });
+function getPriceAdjustPageTotal(responseBody) {
+  const result = getPriceAdjustPageResult(responseBody);
+  const rawTotal = result.total ?? result.totalCount ?? result.count ?? result.totalSize;
+  if (rawTotal == null) return null;
+  const total = Number(rawTotal);
+  return Number.isFinite(total) && total >= 0 ? total : null;
 }
 
-async function clickExactButton(page, label) {
-  const point = await page.evaluate((label) => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-    const isVisible = (node) => {
-      const rect = node.getBoundingClientRect();
-      const style = window.getComputedStyle(node);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    };
-    const buttons = Array.from(document.querySelectorAll("button, [role='button']"))
-      .filter((node) => isVisible(node) && clean(node.innerText || node.textContent) === label)
-      .map((node) => ({ node, rect: node.getBoundingClientRect(), disabled: node.disabled || node.getAttribute("aria-disabled") === "true" }))
-      .filter((item) => !item.disabled)
-      .sort((a, b) => b.rect.top - a.rect.top || b.rect.right - a.rect.right);
-    const button = buttons[0];
-    return button ? { x: button.rect.left + button.rect.width / 2, y: button.rect.top + button.rect.height / 2 } : null;
-  }, label);
-  if (!point) return false;
-  await clickCdpPoint(page, point.x, point.y);
-  return true;
+function firstRowValue(row, keys) {
+  for (const key of keys) {
+    const value = cleanText(row?.[key]);
+    if (value) return value;
+  }
+  return "";
 }
 
-async function fillRejectReasons(page) {
-  const textareas = page.locator("textarea:visible");
-  const count = await textareas.count();
-  let filled = 0;
-  for (let index = 0; index < count; index += 1) {
-    if (await textareas.nth(index).fill(rejectReason, { timeout: 3000 }).then(() => true).catch(() => false)) {
-      filled += 1;
-    }
-  }
-  return filled;
-}
-
-async function rejectVisibleRows(page) {
-  const selectedOrderSns = await selectVisiblePendingRows(page);
-  if (selectedOrderSns.length === 0) {
-    fail("PRICE_ADJUST_SELECT_EMPTY", "待卖家确认表格有数据，但未能勾选任何调价单");
-  }
-
-  if (!(await clickExactButton(page, "批量拒绝"))) {
-    fail("PRICE_ADJUST_BATCH_REJECT_BUTTON_NOT_FOUND", "找不到可点击的批量拒绝按钮");
-  }
-  await page.waitForTimeout(1000);
-
-  const modalText = await bodyText(page, 5000);
-  if (!modalText.includes("拒绝调价") && !modalText.includes("拒绝原因")) {
-    fail("PRICE_ADJUST_REJECT_MODAL_NOT_OPEN", "批量拒绝弹窗未打开");
-  }
-
-  const filledCount = await fillRejectReasons(page);
-  if (filledCount === 0) {
-    fail("PRICE_ADJUST_REJECT_REASON_INPUT_NOT_FOUND", "找不到拒绝原因输入框");
-  }
-
-  const requests = [];
-  const onRequest = (request) => {
-    if (request.url().includes("/api/kiana/magnus/mms/price-adjust/batch-review")) {
-      requests.push({
-        url: request.url(),
-        method: request.method(),
-        postData: request.postData() || "",
-        mallid: request.headers().mallid || "",
-      });
-    }
-  };
-  page.context().on("request", onRequest);
-  const responsePromise = page
-    .waitForResponse((response) => response.url().includes("/api/kiana/magnus/mms/price-adjust/batch-review"), {
-      timeout: 30000,
+function normalizePriceAdjustRows(responseBody) {
+  return getPriceAdjustPageRows(responseBody)
+    .map((row) => {
+      const submitId = firstRowValue(row, [
+        "id",
+        "adjustId",
+        "adjustID",
+        "adjustOrderId",
+        "adjustOrderID",
+        "priceAdjustId",
+        "priceAdjustID",
+        "priceAdjustmentId",
+        "priceAdjustmentID",
+      ]);
+      return {
+        submitId,
+        orderSn: submitId,
+        priceOrderSn: firstRowValue(row, ["priceOrderSn", "priceOrderSN", "orderSn", "orderSN", "orderNo", "orderId", "orderID"]) || submitId,
+        skcId: firstRowValue(row, ["productSkcId", "skcId", "skcID", "skc_id"]),
+        productName: firstRowValue(row, ["productName", "goodsName", "goodsTitle"]),
+        raw: row,
+      };
     })
-    .catch(() => null);
+    .filter((row) => row.submitId);
+}
 
-  if (!(await clickExactButton(page, "拒绝"))) {
-    page.context().off("request", onRequest);
-    fail("PRICE_ADJUST_REJECT_SUBMIT_NOT_FOUND", "找不到拒绝弹窗的提交按钮");
+function uniquePriceAdjustRows(rows) {
+  const seen = new Set();
+  const result = [];
+  for (const row of rows || []) {
+    const submitId = cleanText(row.submitId || row.orderSn);
+    if (!submitId || seen.has(submitId)) continue;
+    seen.add(submitId);
+    result.push(row);
   }
+  return result;
+}
 
-  const response = await responsePromise;
-  page.context().off("request", onRequest);
-  if (!response) fail("PRICE_ADJUST_REJECT_RESPONSE_TIMEOUT", "提交拒绝后未捕获 batch-review 响应");
-  const responseText = await response.text().catch(() => "");
-  let responseBody = null;
-  try {
-    responseBody = responseText ? JSON.parse(responseText) : null;
-  } catch {
-    responseBody = null;
-  }
+async function postPriceAdjustJson(page, endpoint, body, { mallId: providedMallId } = {}) {
+  const url = endpoint.startsWith("http") ? endpoint : `${agentSellerOrigin}${endpoint}`;
+  return await page.evaluate(
+    async ({ endpoint, url, body, providedMallId }) => {
+      const text = (value) => String(value ?? "").trim();
+      const mallId = text(
+        providedMallId ||
+          localStorage.getItem("agentseller-mall-info-id") ||
+          localStorage.getItem("MALL_ID") ||
+          localStorage.getItem("mallId") ||
+          localStorage.getItem("currentMallId") ||
+          localStorage.getItem("selectedMallId") ||
+          localStorage.getItem("lastMallId") ||
+          "",
+      );
 
-  const request = requests[requests.length - 1] || null;
-  const parsedRequest = request?.postData ? JSON.parse(request.postData) : null;
-  if (parsedRequest) {
-    if (parsedRequest.batchResult !== 2) {
-      fail("PRICE_ADJUST_REJECT_SAFETY_CHECK_FAILED", `batch-review 不是拒绝动作：${request.postData}`);
-    }
-    if (!parsedRequest.rejectReasons || Object.values(parsedRequest.rejectReasons).some((value) => String(value) !== rejectReason)) {
-      fail("PRICE_ADJUST_REJECT_REASON_CHECK_FAILED", `batch-review 拒绝原因不是 0：${request.postData}`);
-    }
+      async function getAntiContentValue() {
+        try {
+          if (!window.__temuPriceAdjustChunkRequire) {
+            const factories = {};
+            const chunks = self["webpackJsonp_bg-agent-seller-lgst"] || [];
+            for (const chunk of chunks) {
+              const modules = chunk && chunk[1];
+              if (modules && typeof modules === "object") Object.assign(factories, modules);
+            }
+            const cache = {};
+            const chunkRequire = function(id) {
+              const key = String(id);
+              if (cache[key]) return cache[key].exports;
+              const factory = factories[key];
+              if (!factory) throw new Error("module " + key + " not found");
+              const module = { exports: {} };
+              cache[key] = module;
+              factory.call(module.exports, module, module.exports, chunkRequire);
+              return module.exports;
+            };
+            chunkRequire.d = function(exports, definition) {
+              Object.keys(definition).forEach((key) => {
+                if (!Object.prototype.hasOwnProperty.call(exports, key)) {
+                  Object.defineProperty(exports, key, {
+                    enumerable: true,
+                    get: definition[key],
+                  });
+                }
+              });
+            };
+            chunkRequire.o = function(object, property) {
+              return Object.prototype.hasOwnProperty.call(object, property);
+            };
+            chunkRequire.r = function(exports) {
+              if (typeof Symbol !== "undefined" && Symbol.toStringTag) {
+                Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+              }
+              Object.defineProperty(exports, "__esModule", { value: true });
+            };
+            chunkRequire.n = function(module) {
+              const getter = module && module.__esModule ? () => module.default : () => module;
+              chunkRequire.d(getter, { a: getter });
+              return getter;
+            };
+            window.__temuPriceAdjustChunkRequire = chunkRequire;
+          }
+
+          const riskUtil = window.__temuPriceAdjustChunkRequire && window.__temuPriceAdjustChunkRequire(65531);
+          if (riskUtil && typeof riskUtil.cN === "function") return await riskUtil.cN();
+          if (riskUtil && typeof riskUtil.xy === "function") return riskUtil.xy();
+        } catch {
+        }
+        return "";
+      }
+
+      if (window.__FETCH__ && typeof window.__FETCH__.post === "function") {
+        try {
+          const raw = await window.__FETCH__.post(endpoint, body || {}, {
+            headers: mallId ? { mallid: mallId } : {},
+          });
+          return {
+            responseOk: true,
+            status: 200,
+            endpoint,
+            source: "__FETCH__.post",
+            mallId,
+            raw,
+            text: "",
+          };
+        } catch {
+        }
+      }
+
+      const headers = {
+        accept: "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+      };
+      const antiContent = await getAntiContentValue();
+      if (antiContent) headers["Anti-Content"] = antiContent;
+      if (mallId) headers.mallid = mallId;
+
+      const response = await fetch(url, {
+        method: "POST",
+        credentials: "include",
+        headers,
+        body: JSON.stringify(body || {}),
+      });
+      const rawText = await response.text();
+      let raw = null;
+      try {
+        raw = JSON.parse(rawText);
+      } catch {
+        raw = rawText;
+      }
+      return {
+        responseOk: response.ok,
+        status: response.status,
+        endpoint,
+        source: "window.fetch",
+        mallId,
+        raw,
+        text: typeof raw === "string" ? raw.slice(0, 1000) : "",
+      };
+    },
+    { endpoint, url, body, providedMallId },
+  );
+}
+
+function assertPriceAdjustApiResult(response, label) {
+  if (!response?.responseOk) {
+    fail("PRICE_ADJUST_API_HTTP_FAILED", `${label} HTTP ${response?.status || "unknown"}${response?.text ? `：${response.text}` : ""}`);
   }
-  const errorCode = responseBody?.errorCode ?? responseBody?.error_code;
-  if (!response.ok() || responseBody?.success === false || (errorCode !== undefined && Number(errorCode) !== 1000000)) {
+  const raw = response.raw;
+  if (!raw || typeof raw !== "object") {
+    fail("PRICE_ADJUST_API_NON_JSON", `${label} 返回非 JSON`);
+  }
+  const errorCode = raw.errorCode ?? raw.error_code;
+  if (raw.success === false || (errorCode !== undefined && Number(errorCode) !== 1000000)) {
     fail(
-      "PRICE_ADJUST_REJECT_RESPONSE_FAILED",
-      `batch-review 返回失败：status=${response.status()} code=${errorCode ?? "unknown"} msg=${responseBody?.errorMsg || responseBody?.error_msg || responseText}`,
+      "PRICE_ADJUST_API_RESPONSE_FAILED",
+      `${label} 返回失败：code=${errorCode ?? "unknown"} msg=${raw.errorMsg || raw.error_msg || raw.message || "unknown"}`,
     );
+  }
+  return raw.result || {};
+}
+
+async function priceAdjustApiResult(page, endpoint, body = {}, options = {}, label = "调价 API") {
+  const response = await postPriceAdjustJson(page, endpoint, body, options);
+  return assertPriceAdjustApiResult(response, label);
+}
+
+async function priceAdjustApiMallList(page) {
+  const result = await priceAdjustApiResult(page, "/api/seller/auth/userInfo", {}, {}, "店铺列表接口");
+  const malls = result.mallList || [];
+  if (!Array.isArray(malls) || malls.length === 0) {
+    fail("PRICE_ADJUST_API_MALL_LIST_EMPTY", "店铺列表接口没有返回可用店铺");
+  }
+  return malls;
+}
+
+function mallInfoForShop(malls, shopName) {
+  const matches = (malls || []).filter((mall) => cleanText(mall.mallName) === shopName);
+  if (matches.length !== 1) {
+    fail("PRICE_ADJUST_API_SHOP_NOT_FOUND", `店铺列表接口中找不到唯一精确店名：${shopName}；匹配数=${matches.length}`);
+  }
+
+  const mall = matches[0];
+  const mallId = cleanText(mall.mallId);
+  if (!mallId) fail("PRICE_ADJUST_API_MALL_ID_MISSING", `店铺列表接口中 ${shopName} 缺少 mallId`);
+  return {
+    source: "api",
+    mallId,
+    mallName: cleanText(mall.mallName),
+    managedType: mall.managedType ?? null,
+    mallMode: mall.mallMode ?? null,
+    uniqueId: mall.uniqueId || "",
+  };
+}
+
+async function queryPriceAdjustPendingPage(page, mallId, pageNo) {
+  const requestBody = {
+    pageInfo: {
+      pageSize: priceAdjustPageSize,
+      pageNo,
+    },
+    status: 1,
+  };
+  const response = await postPriceAdjustJson(page, priceAdjustPageQueryApi, requestBody, { mallId });
+  assertPriceAdjustApiResult(response, "查询调价列表");
+  return {
+    pageNo,
+    pageSize: priceAdjustPageSize,
+    mallId: response.mallId || "",
+    source: response.source || "",
+    total: getPriceAdjustPageTotal(response.raw),
+    rows: normalizePriceAdjustRows(response.raw),
+  };
+}
+
+async function queryAllPriceAdjustPendingRows(page, mallId) {
+  const rows = [];
+  const seen = new Set();
+  const pages = [];
+  let total = null;
+  let responseMallId = "";
+
+  for (let pageNo = 1; pageNo <= priceAdjustMaxPages; pageNo += 1) {
+    const pageResult = await queryPriceAdjustPendingPage(page, mallId, pageNo);
+    total = pageResult.total ?? total;
+    responseMallId ||= pageResult.mallId;
+    pages.push({
+      pageNo: pageResult.pageNo,
+      pageSize: pageResult.pageSize,
+      total: pageResult.total,
+      count: pageResult.rows.length,
+      source: pageResult.source,
+    });
+    for (const row of uniquePriceAdjustRows(pageResult.rows)) {
+      if (seen.has(row.submitId)) continue;
+      seen.add(row.submitId);
+      rows.push(row);
+    }
+    if (!pageResult.rows.length || (total != null && rows.length >= total) || pageResult.rows.length < priceAdjustPageSize) {
+      return {
+        rows,
+        total: total ?? rows.length,
+        pageCount: pageNo,
+        pageSize: priceAdjustPageSize,
+        mallId: responseMallId || mallId,
+        pages,
+      };
+    }
+  }
+
+  fail("PRICE_ADJUST_QUERY_TOO_MANY_PAGES", `查询调价列表超过最大页数 ${priceAdjustMaxPages}，已停止以避免误操作`);
+}
+
+function chunkItems(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function buildPriceAdjustRejectRequest(rows) {
+  const submitOrders = [];
+  const rejectReasons = {};
+  for (const row of uniquePriceAdjustRows(rows)) {
+    const submitId = cleanText(row.submitId || row.orderSn);
+    if (!submitId || rejectReasons[submitId]) continue;
+    submitOrders.push(submitId);
+    rejectReasons[submitId] = rejectReason;
+  }
+  return {
+    batchResult: 2,
+    submitOrders,
+    rejectReasons,
+  };
+}
+
+function assertSafePriceAdjustRejectRequest(request) {
+  if (!request || request.batchResult !== 2) {
+    fail("PRICE_ADJUST_REJECT_SAFETY_CHECK_FAILED", `batch-review 不是拒绝动作：${JSON.stringify(request)}`);
+  }
+  if (!Array.isArray(request.submitOrders) || request.submitOrders.length === 0) {
+    fail("PRICE_ADJUST_REJECT_EMPTY", "没有可拒绝的调价单 ID");
+  }
+  if (request.submitOrders.some((id) => !/^\d+$/.test(cleanText(id)))) {
+    fail("PRICE_ADJUST_REJECT_ID_CHECK_FAILED", `submitOrders 包含非内部数字 ID：${JSON.stringify(request.submitOrders)}`);
+  }
+  if (!request.rejectReasons || Object.values(request.rejectReasons).some((value) => String(value) !== rejectReason)) {
+    fail("PRICE_ADJUST_REJECT_REASON_CHECK_FAILED", `batch-review 拒绝原因不是 0：${JSON.stringify(request.rejectReasons)}`);
+  }
+}
+
+async function rejectPriceAdjustRowsByApi(page, mallId, rows) {
+  const request = buildPriceAdjustRejectRequest(rows);
+  assertSafePriceAdjustRejectRequest(request);
+  const response = await postPriceAdjustJson(page, priceAdjustBatchReviewApi, request, { mallId });
+  assertPriceAdjustApiResult(response, "拒绝调价");
+  return {
+    source: response.source || "",
+    mallId: response.mallId || "",
+    submittedCount: request.submitOrders.length,
+    request,
+    response: response.raw,
+  };
+}
+
+async function waitForPriceAdjustPendingAfterReject(page, mallId, beforeCount) {
+  let snapshot = {
+    rows: [],
+    total: beforeCount,
+    pageCount: 0,
+    pages: [],
+  };
+
+  for (let attempt = 1; attempt <= priceAdjustPollCount; attempt += 1) {
+    if (attempt > 1) await new Promise((resolve) => setTimeout(resolve, priceAdjustPollMs));
+    snapshot = await queryAllPriceAdjustPendingRows(page, mallId);
+    if (snapshot.total === 0 || snapshot.total < beforeCount) {
+      return {
+        snapshot,
+        attempts: attempt,
+        settled: true,
+      };
+    }
   }
 
   return {
-    selectedOrderSns,
-    request,
-    requestBodyVisible: Boolean(parsedRequest),
-    response: {
-      status: response.status(),
-      body: responseBody,
-      text: responseBody ? "" : responseText.slice(0, 1000),
-    },
+    snapshot,
+    attempts: priceAdjustPollCount,
+    settled: false,
   };
 }
 
-async function collectAndMaybeRejectShop(page, shopName) {
-  await clickConfirmingTab(page);
-  const text = await bodyText(page);
-  if (!isPriceAdjustPageReady(text)) {
-    const diagnosticsPath = await captureDiagnostics(page, "price-adjust-page-not-ready");
-    fail("PRICE_ADJUST_TAB_NOT_READY", `${shopName} 未进入待卖家确认页；诊断=${diagnosticsPath}`);
+async function collectAndMaybeRejectShop(page, shopName, apiMalls) {
+  const apiSwitch = mallInfoForShop(apiMalls, shopName);
+  const beforeSnapshot = await queryAllPriceAdjustPendingRows(page, apiSwitch.mallId);
+  const beforeRows = uniquePriceAdjustRows(beforeSnapshot.rows);
+  const pendingBefore = beforeSnapshot.total ?? beforeRows.length;
+
+  if (pendingBefore > 0 && beforeRows.length === 0) {
+    fail("PRICE_ADJUST_PENDING_IDS_EMPTY", `${shopName} 待卖家确认数量为 ${pendingBefore}，但接口未返回可提交调价 ID`);
   }
 
-  const beforeRows = await extractPendingRowsFromDom(page);
   if (!shouldReject || beforeRows.length === 0) {
     return {
       shopName,
-      source: "dom-ui",
+      source: "api",
       rejected: false,
-      pendingBefore: beforeRows.length,
-      pendingAfter: beforeRows.length,
+      rejectReason,
+      pendingBefore,
+      pendingAfter: pendingBefore,
+      pageSize: beforeSnapshot.pageSize,
+      pageCount: beforeSnapshot.pageCount,
+      mallId: beforeSnapshot.mallId || apiSwitch.mallId,
+      apiSwitch,
       rowsBefore: beforeRows,
+      pages: beforeSnapshot.pages,
       actions: [],
     };
   }
 
   const actions = [];
-  while (true) {
-    const rows = await extractPendingRowsFromDom(page);
-    if (rows.length === 0) break;
-    actions.push(await rejectVisibleRows(page));
-    await waitSettled(page);
-    await clickConfirmingTab(page);
+  for (const batch of chunkItems(beforeRows, priceAdjustPageSize)) {
+    actions.push(await rejectPriceAdjustRowsByApi(page, apiSwitch.mallId, batch));
   }
 
-  const afterRows = await extractPendingRowsFromDom(page);
+  const afterPoll = await waitForPriceAdjustPendingAfterReject(page, apiSwitch.mallId, pendingBefore);
+  const afterSnapshot = afterPoll.snapshot;
+  const pendingAfter = afterSnapshot.total ?? afterSnapshot.rows.length;
+
   return {
     shopName,
-    source: "dom-ui",
+    source: "api",
     rejected: true,
     rejectReason,
-    pendingBefore: beforeRows.length,
-    pendingAfter: afterRows.length,
+    pendingBefore,
+    pendingAfter,
+    submittedCount: beforeRows.length,
+    rejectedCount: Math.max(0, pendingBefore - pendingAfter),
+    pageSize: beforeSnapshot.pageSize,
+    pageCount: beforeSnapshot.pageCount,
+    afterPollAttempts: afterPoll.attempts,
+    afterPollSettled: afterPoll.settled,
+    mallId: afterSnapshot.mallId || beforeSnapshot.mallId || apiSwitch.mallId,
+    apiSwitch,
     rowsBefore: beforeRows,
-    rowsAfter: afterRows,
+    rowsAfter: afterSnapshot.rows,
+    pages: beforeSnapshot.pages,
     actions,
   };
 }
 
 async function runAccount(account) {
   const shops = shopListForAccount(account);
-  const knownShops = [...new Set([...(account.knownShops || []), ...shops])];
   if (shops.length === 0) fail("NO_SHOPS_CONFIGURED", `${account.label || account.id} 没有配置店铺`);
 
-  const { browser, context, page } = await connectCdpChrome(account, targetUrl);
+  const { browser, context, page } = await connectCdpChrome(account, agentSellerEntryUrl);
   try {
-    let activePage = await ensureTargetPage(context, page);
+    const activePage = await ensureAgentSellerPage(context, page);
+    const apiMalls = await priceAdjustApiMallList(activePage);
     const shopReports = [];
     for (const shopName of shops) {
-      activePage = await switchShop(context, activePage, shopName, knownShops);
-      shopReports.push(await collectAndMaybeRejectShop(activePage, shopName));
+      shopReports.push(await collectAndMaybeRejectShop(activePage, shopName, apiMalls));
     }
     return { account, ok: true, shops: shopReports };
   } catch (error) {
@@ -951,9 +1019,11 @@ function buildMessage(results) {
       if (!result.ok) return `【${label}】失败：${result.error}`;
       return [
         `【${label}】`,
-        ...result.shops.map((shop) =>
-          `${shop.shopName}: 待拒绝 ${shop.pendingBefore}，已拒绝 ${shop.rejected ? shop.pendingBefore - shop.pendingAfter : 0}，剩余 ${shop.pendingAfter}`,
-        ),
+        ...result.shops.map((shop) => {
+          const rejectedCount = shop.rejected ? Number(shop.rejectedCount ?? Math.max(0, Number(shop.pendingBefore || 0) - Number(shop.pendingAfter || 0))) : 0;
+          const submittedText = shop.submittedCount != null ? `，已提交 ${Number(shop.submittedCount || 0)}` : "";
+          return `${shop.shopName}: 待拒绝 ${shop.pendingBefore}${submittedText}，已拒绝 ${rejectedCount}，剩余 ${shop.pendingAfter}`;
+        }),
       ].join("\n");
     })
     .join("\n\n");
@@ -980,13 +1050,18 @@ await fs.writeFile(
     {
       generatedAt: new Date().toISOString(),
       accountsPath,
-      targetUrl,
+      agentSellerEntryUrl,
       dryRun: !shouldReject,
       rejectReason,
       api: {
-        statusCount: "POST https://agentseller.temu.com/api/kiana/magnus/mms/price-adjust/status-count",
-        pageQuery: "POST https://agentseller.temu.com/api/kiana/magnus/mms/price-adjust/page-query",
-        batchReview: "POST https://agentseller.temu.com/api/kiana/magnus/mms/price-adjust/batch-review",
+        mallList: `${agentSellerOrigin}/api/seller/auth/userInfo`,
+        pageQuery: `${agentSellerOrigin}/api/kiana/magnus/mms/price-adjust/page-query`,
+        batchReview: `${agentSellerOrigin}/api/kiana/magnus/mms/price-adjust/batch-review`,
+        mallIdHeader: true,
+        pageQueryBody: {
+          pageInfo: { pageSize: priceAdjustPageSize, pageNo: "<page>" },
+          status: 1,
+        },
         rejectPayloadShape: {
           batchResult: 2,
           submitOrders: ["<adjust id>"],
