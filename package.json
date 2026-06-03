@@ -16,6 +16,8 @@
     "temu:report:codex:today": "TEMU_REPORT_DATE=today scripts/run-codex-temu-report.sh",
     "temu:report:codex:yesterday": "TEMU_REPORT_DATE=yesterday scripts/run-codex-temu-report.sh",
     "temu:abnormal": "node scripts/temu-abnormal-orders.mjs",
+    "temu:price-adjust-reject": "node scripts/temu-price-adjust-reject.mjs --reject",
+    "temu:price-adjust-reject:dry": "node scripts/temu-price-adjust-reject.mjs",
     "temu:agentseller-checks": "node scripts/temu-run-agentseller-checks.mjs",
     "temu:operation-status": "node scripts/temu-operation-status.mjs",
     "temu:operation-status:markdown": "node scripts/temu-operation-status-markdown.mjs",

@@ -6,12 +6,13 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 
 const checks = [
   ["abnormal-orders", "scripts/temu-abnormal-orders.mjs"],
+  ["price-adjust-reject", "scripts/temu-price-adjust-reject.mjs", ["--reject"]],
   ["operation-status", "scripts/temu-operation-status.mjs"],
 ];
 
-function runChild(label, script) {
+function runChild(label, script, args = []) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [script], {
+    const child = spawn(process.execPath, [script, ...args], {
       cwd: rootDir,
       env: process.env,
       stdio: ["ignore", "inherit", "inherit"],

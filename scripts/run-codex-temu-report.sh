@@ -126,9 +126,10 @@ while (( attempt <= max_attempts )); do
   if /usr/bin/caffeinate -d -i -m /Users/vure/.nvm/versions/node/v22.22.3/bin/npm run temu:report:all:image; then
     log_audit "success: attempt=$attempt/$max_attempts"
     exit 0
+  else
+    last_status=$?
   fi
 
-  last_status=$?
   log_audit "retryable_failure: attempt=$attempt/$max_attempts status=$last_status"
 
   if (( attempt < max_attempts )); then

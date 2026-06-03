@@ -454,7 +454,8 @@ async function trySavedPasswordAutofill(page) {
   for (const tab of ["", "邮箱登录", "手机号登录"]) {
     if (tab) {
       await page.getByText(tab, { exact: true }).click({ timeout: 3000 }).catch(() => {});
-      await page.waitForTimeout(800);
+      await page.waitForTimeout(800).catch(() => {});
+      if (page.isClosed()) return true;
     }
 
     const inputs = await visibleInputMeta(page);
@@ -469,7 +470,8 @@ async function trySavedPasswordAutofill(page) {
       await page.keyboard.press("ArrowDown").catch(() => {});
       await page.waitForTimeout(250);
       await page.keyboard.press("Enter").catch(() => {});
-      await page.waitForTimeout(800);
+      await page.waitForTimeout(800).catch(() => {});
+      if (page.isClosed()) return true;
     }
 
     const values = await valuesByInputIndex(page, [usernameIndex, passwordIndex]);
@@ -597,7 +599,14 @@ async function attemptAutoLogin(context, page) {
     fail("AUTO_LOGIN_CONSENT_NOT_CHECKED", "授权复选框未成功勾选");
   }
 
-  const hasCredentials = (await trySavedPasswordAutofill(sellerPage)) || (await tryConfiguredCredentials(sellerPage));
+  const hasSavedCredentials = await trySavedPasswordAutofill(sellerPage);
+  if (sellerPage.isClosed()) {
+    const loggedInPage = await waitForLoggedInPage(context, 20000);
+    if (loggedInPage) return loggedInPage;
+    fail("AUTO_LOGIN_PAGE_CLOSED", "卖家中心登录页已关闭，但未找到已登录后台页");
+  }
+
+  const hasCredentials = hasSavedCredentials || (await tryConfiguredCredentials(sellerPage));
   if (!hasCredentials) {
     fail("AUTO_LOGIN_PASSWORD_NOT_FILLED", "Chrome 保存密码未自动填充，且没有运行时账号密码");
   }
