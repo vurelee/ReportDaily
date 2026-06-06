@@ -72,6 +72,8 @@ if (reportDate === "today") {
   await runNode("operation status markdown delivery", "scripts/temu-operation-status-markdown.mjs", [
     "--input",
     operationJson,
+    "--abnormal-input",
+    abnormalJson,
     "--send-wecom",
   ]);
 } else {

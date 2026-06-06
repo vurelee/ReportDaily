@@ -30,6 +30,20 @@ async function findLatestOperationStatusReport() {
   return stats[0].filePath;
 }
 
+async function findLatestAbnormalReport() {
+  const entries = await fs.readdir(reportDir);
+  const matches = entries
+    .filter((name) => /^temu-abnormal-orders-.+\.json$/.test(name))
+    .map((name) => path.join(reportDir, name));
+
+  const stats = await Promise.all(
+    matches.map(async (filePath) => ({ filePath, stat: await fs.stat(filePath) })),
+  );
+  stats.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+  if (!stats[0]) throw new Error(`No abnormal orders report found in ${reportDir}`);
+  return stats[0].filePath;
+}
+
 function escapeMarkdownTableCell(value) {
   return String(value ?? "")
     .replace(/\r?\n/g, " ")
@@ -46,6 +60,36 @@ function operationAbnormalSpuIds(shop) {
 
 function shopDisplayName(shopName) {
   return shopDisplayNames[shopName] || shopName;
+}
+
+function abnormalCountValue(shop) {
+  const value = Number.parseInt(String(shop?.abnormalCount ?? "0"), 10);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function collectAbnormalRows(report) {
+  const rows = [];
+  for (const result of report.results || []) {
+    if (!result.ok) {
+      rows.push({
+        shopName: result.account?.label || result.account?.id || "账号",
+        abnormalCount: "-",
+        error: result.error || "检查失败",
+      });
+      continue;
+    }
+
+    for (const shop of result.shops || []) {
+      const shopName = shop.shopName || "-";
+      rows.push({
+        shopName,
+        displayShopName: shopDisplayName(shopName),
+        abnormalCount: shop.hasPermission === false ? "无权限" : String(abnormalCountValue(shop)),
+        error: "",
+      });
+    }
+  }
+  return rows;
 }
 
 function collectRows(report) {
@@ -75,12 +119,31 @@ function collectRows(report) {
   return rows;
 }
 
-function buildOperationStatusMarkdownV2(report) {
+function buildAbnormalMarkdownV2(report) {
+  if (!report) return "";
+
+  const rows = collectAbnormalRows(report);
+  const lines = ["# 出库单异常", "", "| 店铺 | 异常单数 |", "| :----- | :----: |"];
+  for (const row of rows) {
+    lines.push(
+      `| ${escapeMarkdownTableCell(row.displayShopName || row.shopName)} | ${escapeMarkdownTableCell(row.error || row.abnormalCount)} |`,
+    );
+  }
+
+  if (rows.length === 0) {
+    lines.push("| - | 0 |");
+  }
+
+  return lines.join("\n");
+}
+
+function buildOperationStatusMarkdownV2(report, abnormalReport = null) {
   const rows = collectRows(report);
   const lines = [
+    buildAbnormalMarkdownV2(abnormalReport),
     "# 店铺运营状态",
     "",
-  ];
+  ].filter(Boolean);
 
   lines.push(
     "| 店铺 | 在售SPU数 |",
@@ -116,8 +179,15 @@ function buildOperationStatusMarkdownV2(report) {
 
 async function main() {
   const inputPath = path.resolve(getFlagValue("--input") || (await findLatestOperationStatusReport()));
+  const abnormalInput = getFlagValue("--abnormal-input");
+  const abnormalPath = abnormalInput
+    ? path.resolve(abnormalInput)
+    : args.includes("--include-abnormal")
+      ? path.resolve(await findLatestAbnormalReport())
+      : "";
   const report = JSON.parse(await fs.readFile(inputPath, "utf8"));
-  const markdownV2 = buildOperationStatusMarkdownV2(report);
+  const abnormalReport = abnormalPath ? JSON.parse(await fs.readFile(abnormalPath, "utf8")) : null;
+  const markdownV2 = buildOperationStatusMarkdownV2(report, abnormalReport);
 
   let sentWecom = false;
   if (args.includes("--send-wecom") && process.env.TEMU_SEND_WECOM !== "0") {
@@ -126,6 +196,7 @@ async function main() {
   }
 
   console.log(`Input JSON: ${inputPath}`);
+  if (abnormalPath) console.log(`Abnormal JSON: ${abnormalPath}`);
   if (args.includes("--print") || args.includes("--print-wecom-markdown")) {
     console.log("WeCom markdown_v2:");
     console.log(markdownV2);

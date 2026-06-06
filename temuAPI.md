@@ -625,6 +625,7 @@ TEMU_ABNORMAL_API_DOM_FALLBACK=0 TEMU_ACCOUNT_ID=setonr npm run temu:abnormal
 
 ## 新接口接入检查清单
 
+
 - [ ] 目标页 URL 已确认，且属于 `agentseller.temu.com`。
 - [ ] Network capture 已拿到真实请求和响应。
 - [ ] endpoint、请求体、分页、筛选条件已记录。

@@ -22,7 +22,8 @@
     "temu:operation-status": "node scripts/temu-operation-status.mjs",
     "temu:operation-status:markdown": "node scripts/temu-operation-status-markdown.mjs",
     "temu:operation-status:image": "node scripts/temu-operation-status-image.mjs",
-    "temu:abnormal:capture": "TEMU_CAPTURE_NETWORK=1 node scripts/temu-abnormal-orders.mjs"
+    "temu:abnormal:capture": "TEMU_CAPTURE_NETWORK=1 node scripts/temu-abnormal-orders.mjs",
+    "temu:shop-funds": "node scripts/temu-shop-funds.mjs"
   },
   "dependencies": {
     "playwright": "^1.52.0"

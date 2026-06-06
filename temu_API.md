@@ -399,6 +399,327 @@ mallid: <mallId>
 - 包含 `英国站` 或 `英国`：英区。
 - 包含 `美国站` 或 `美国`：美区。
 
+## Seller Center 资金中心页面 API
+
+资金中心不在 `agentseller.temu.com`，页面是：
+
+```text
+https://seller.kuajingmaihuo.com/labor/account
+```
+
+当前已验证的已结算款项来源是 Seller Center 页面内 API。页面负责复用 Chrome 登录态和当前店铺 session，数据读取走接口，不从 DOM 表格采集。
+
+### Seller Center 店铺列表
+
+用途：获取当前账号可见店铺、精确店名和 `mallId`。
+
+```http
+POST /bg/quiet/api/mms/userInfo
+```
+
+请求体：
+
+```json
+{}
+```
+
+关键响应字段：
+
+```json
+{
+  "result": {
+    "companyList": [
+      {
+        "malInfoList": [
+          {
+            "mallId": 634418216263713,
+            "mallName": "SETONR Products",
+            "mallMode": 1,
+            "isSemiManagedMall": true
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+匹配规则继续使用精确 `mallName`，不要模糊匹配。
+
+### 当前店铺实体校验
+
+用途：确认页面当前 session 对应的店铺，避免切店后拿错余额。
+
+```http
+POST /api/merchant/payment/account/mall/entity/query
+```
+
+请求体：
+
+```json
+{}
+```
+
+关键响应字段：
+
+```json
+{
+  "result": {
+    "mallId": 634418216263713,
+    "entityId": 634418214714893,
+    "mallStatus": 1
+  }
+}
+```
+
+当前脚本会校验这里的 `mallId` 等于目标店铺的 `mallId`。
+
+### 已结算资金
+
+用途：获取资金中心页面里的已结算资金。当前口径不是只取页面 `可用余额(CNY)`，而是：
+
+```text
+已结算资金 = 已结算-可用余额 + 发起申请 + 银行处理中
+```
+
+其中 `已结算-可用余额` 来自页面标签 `可用余额(CNY)`。
+
+```http
+POST /api/merchant/payment/account/amount/info
+```
+
+请求体：
+
+```json
+{}
+```
+
+关键响应字段：
+
+```json
+{
+  "result": {
+    "currency": "CNY",
+    "availableBalance": "3966.94",
+    "availableBalanceFormat": {
+      "value": 396694,
+      "symbol": "¥",
+      "currencyCode": "CNY",
+      "digitalText": "3,966.94"
+    }
+  }
+}
+```
+
+提现记录表格接口：
+
+```http
+POST /api/merchant/payment/account/withdraw/cash/record
+```
+
+请求体：
+
+```json
+{
+  "page": 1,
+  "pageSize": 100
+}
+```
+
+关键响应字段：
+
+```json
+{
+  "result": {
+    "total": 106,
+    "resultList": [
+      {
+        "fundAccount": "货款提现",
+        "createTime": "2026-06-05 21:20:48",
+        "withdrawCashAmount": "5200.00(CNY)",
+        "withdrawCashStatus": "发起申请",
+        "statusCode": 0,
+        "beneficiaryAccount": "广发银行 (8583)",
+        "withdrawCashAmountFormat": {
+          "value": 520000,
+          "symbol": "¥",
+          "currencyCode": "CNY",
+          "digitalText": "5,200.00"
+        }
+      }
+    ]
+  }
+}
+```
+
+当前脚本：
+
+- 先打开资金中心页面建立 Seller Center 登录态和页面 runtime。
+- 用 `userInfo` 精确匹配目标店铺 `mallId`。
+- 调用 `mall/entity/query` 和 `amount/info` 时带请求头 `mallid: <mallId>`、请求体 `{}`。
+- 调用 `withdraw/cash/record` 时同样带请求头 `mallid: <mallId>`，按 `pageSize=100` 翻页拉完整提现记录。
+- 由页面 fetch/runtime 自动生成 `Anti-Content`；不要保存或复用抓包里的固定 `Anti-Content`。
+- `amount/info` 的 `availableBalance` / `availableBalanceFormat.digitalText` 作为 `已结算-可用余额`。
+- 提现记录只统计 `withdrawCashStatus` 为 `发起申请` 或 `银行处理中` 的 `withdrawCashAmountFormat.value`。
+- 最终 `settledFunds.amountInCents` / `settledFunds.totalAmountText` 是 `已结算-可用余额 + 发起申请 + 银行处理中` 的合计。
+
+已验证样例：
+
+- `LEEEV` 店铺 `mallId=634418217285830`。
+- `已结算-可用余额` 为 `2,049.60`。
+- 提现记录中有一笔 `2026-06-05 21:20:48` 的 `发起申请`，金额 `5,200.00`。
+- 新口径已结算资金为 `7,249.60`。
+
+入口命令：
+
+```bash
+TEMU_ACCOUNT_ID=setonr npm run temu:shop-funds
+```
+
+## AgentSeller 结算数据页面 API
+
+待处理款项来自 AgentSeller 结算数据页面。页面入口按店铺类型不同：
+
+- 半托管店铺：欧区 `https://agentseller-eu.temu.com/labor/settle`，美区 `https://agentseller-us.temu.com/labor/settle`。
+- 全托管店铺：欧区、美区同上，全球区 `https://agentseller.temu.com/labor/settle`。
+
+脚本会先进入对应页面，遇到 `auth/authentication` 时点击“中国地区 / 商家中心”，再用 Seller Center 授权页的“确认授权并前往”完成授权。弹窗和协议勾选继续使用项目内的 `temu-popup-cleaner.mjs`、`temu-consent-helper.mjs`。
+
+已记录的资金店铺清单：
+
+- 全托管：`Whitine Products`，`SETONR`。
+- 半托管：`Whitine Products Global`，`LEEEV Global Outlet`，`LEEEV`，`SETONR Products`，`SETONR Origin`。
+
+### AgentSeller 店铺列表
+
+用途：获取 AgentSeller 侧可见店铺和 `mallId`。同一账号下继续按精确 `mallName` 匹配，不做模糊匹配。
+
+```http
+POST /api/seller/auth/userInfo
+```
+
+请求体：
+
+```json
+{}
+```
+
+关键响应字段：
+
+```json
+{
+  "result": {
+    "mallList": [
+      {
+        "mallId": 634418216263713,
+        "mallName": "SETONR Products",
+        "managedType": 1,
+        "mallMode": 1
+      },
+      {
+        "mallId": 634418224771498,
+        "mallName": "SETONR",
+        "managedType": 0,
+        "mallMode": 0
+      }
+    ]
+  }
+}
+```
+
+### 半托待处理款项
+
+用途：获取半托店铺的页面标签 `待处理款项总额`。当前接口在欧区、美区域名下相同。
+
+```http
+POST /api/xiaowenhou/settle-flow/sm/unsettle/page-query
+```
+
+请求体示例：
+
+```json
+{
+  "pageSize": 1,
+  "pageNum": 1,
+  "orderCreateTimeStart": "2026-05-07",
+  "orderCreateTimeEnd": "2026-06-05"
+}
+```
+
+关键响应字段：
+
+```json
+{
+  "result": {
+    "total": 5389,
+    "totalAmount": {
+      "value": 68001631,
+      "symbol": "¥",
+      "currencyCode": "CNY",
+      "digitalText": "680,016.31"
+    },
+    "productPaymentTotalAmount": {
+      "digitalText": "606,813.87"
+    },
+    "productRefundTotalAmount": {
+      "digitalText": "13,141.45"
+    },
+    "shippingPaymentTotalAmount": {
+      "digitalText": "88,049.63"
+    },
+    "shippingRefundTotalAmount": {
+      "digitalText": "2,248.82"
+    },
+    "dataUpdateTime": "2026-06-05 17:00:00"
+  }
+}
+```
+
+当前脚本规则：
+
+- 分别请求欧区和美区。
+- 时间范围取上海日期过去 60 天，拆成两个最多 30 天窗口。
+- 日期字段使用 `yyyy-MM-dd` 字符串；毫秒时间戳会返回 `Params invalid`。
+- 请求头带 `mallid: <mallId>`，不通过页面可见切店。
+- 取各窗口 `totalAmount.value` 相加后格式化为店铺半托 `待处理款项总额`。
+
+### 全托待处理款项
+
+用途：获取全托店铺的页面标签 `预估待结算销售额(CNY)`。
+
+```http
+POST /api/merchant/settle/detail/full/wait-settlement
+```
+
+请求体：
+
+```json
+{}
+```
+
+关键响应字段：
+
+```json
+{
+  "result": {
+    "res": {
+      "waitSettleAmount": {
+        "value": 71532,
+        "symbol": "¥",
+        "currencyCode": "CNY",
+        "digitalText": "715.32"
+      }
+    }
+  }
+}
+```
+
+当前脚本规则：
+
+- 分别请求欧区、美区、全球区。
+- 请求头带 `mallid: <mallId>`。
+- 取三域 `res.waitSettleAmount.value` 相加后格式化为全托 `预估待结算销售额(CNY)`。
+
 ## 扩展其它 AgentSeller 页面 API 的步骤
 
 ### 1. 打开对应页面并确认登录授权
