@@ -11,6 +11,8 @@ import {
   isSellerLoginFormText,
   loginSellerIfNeeded,
 } from "./temu-login-helper.mjs";
+import { temuPageApiPost } from "./temu-page-api-client.mjs";
+import { extractMallList, resolveMallByExactName } from "./temu-mall-resolver.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const accountsPath = process.env.TEMU_ACCOUNTS_CONFIG || path.join(rootDir, "temu-accounts.json");
@@ -368,127 +370,22 @@ function uniquePriceAdjustRows(rows) {
 }
 
 async function postPriceAdjustJson(page, endpoint, body, { mallId: providedMallId } = {}) {
-  const url = endpoint.startsWith("http") ? endpoint : `${agentSellerOrigin}${endpoint}`;
-  return await page.evaluate(
-    async ({ endpoint, url, body, providedMallId }) => {
-      const text = (value) => String(value ?? "").trim();
-      const mallId = text(
-        providedMallId ||
-          localStorage.getItem("agentseller-mall-info-id") ||
-          localStorage.getItem("MALL_ID") ||
-          localStorage.getItem("mallId") ||
-          localStorage.getItem("currentMallId") ||
-          localStorage.getItem("selectedMallId") ||
-          localStorage.getItem("lastMallId") ||
-          "",
-      );
-
-      async function getAntiContentValue() {
-        try {
-          if (!window.__temuPriceAdjustChunkRequire) {
-            const factories = {};
-            const chunks = self["webpackJsonp_bg-agent-seller-lgst"] || [];
-            for (const chunk of chunks) {
-              const modules = chunk && chunk[1];
-              if (modules && typeof modules === "object") Object.assign(factories, modules);
-            }
-            const cache = {};
-            const chunkRequire = function(id) {
-              const key = String(id);
-              if (cache[key]) return cache[key].exports;
-              const factory = factories[key];
-              if (!factory) throw new Error("module " + key + " not found");
-              const module = { exports: {} };
-              cache[key] = module;
-              factory.call(module.exports, module, module.exports, chunkRequire);
-              return module.exports;
-            };
-            chunkRequire.d = function(exports, definition) {
-              Object.keys(definition).forEach((key) => {
-                if (!Object.prototype.hasOwnProperty.call(exports, key)) {
-                  Object.defineProperty(exports, key, {
-                    enumerable: true,
-                    get: definition[key],
-                  });
-                }
-              });
-            };
-            chunkRequire.o = function(object, property) {
-              return Object.prototype.hasOwnProperty.call(object, property);
-            };
-            chunkRequire.r = function(exports) {
-              if (typeof Symbol !== "undefined" && Symbol.toStringTag) {
-                Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
-              }
-              Object.defineProperty(exports, "__esModule", { value: true });
-            };
-            chunkRequire.n = function(module) {
-              const getter = module && module.__esModule ? () => module.default : () => module;
-              chunkRequire.d(getter, { a: getter });
-              return getter;
-            };
-            window.__temuPriceAdjustChunkRequire = chunkRequire;
-          }
-
-          const riskUtil = window.__temuPriceAdjustChunkRequire && window.__temuPriceAdjustChunkRequire(65531);
-          if (riskUtil && typeof riskUtil.cN === "function") return await riskUtil.cN();
-          if (riskUtil && typeof riskUtil.xy === "function") return riskUtil.xy();
-        } catch {
-        }
-        return "";
-      }
-
-      if (window.__FETCH__ && typeof window.__FETCH__.post === "function") {
-        try {
-          const raw = await window.__FETCH__.post(endpoint, body || {}, {
-            headers: mallId ? { mallid: mallId } : {},
-          });
-          return {
-            responseOk: true,
-            status: 200,
-            endpoint,
-            source: "__FETCH__.post",
-            mallId,
-            raw,
-            text: "",
-          };
-        } catch {
-        }
-      }
-
-      const headers = {
-        accept: "application/json, text/plain, */*",
-        "Content-Type": "application/json",
-      };
-      const antiContent = await getAntiContentValue();
-      if (antiContent) headers["Anti-Content"] = antiContent;
-      if (mallId) headers.mallid = mallId;
-
-      const response = await fetch(url, {
-        method: "POST",
-        credentials: "include",
-        headers,
-        body: JSON.stringify(body || {}),
-      });
-      const rawText = await response.text();
-      let raw = null;
-      try {
-        raw = JSON.parse(rawText);
-      } catch {
-        raw = rawText;
-      }
-      return {
-        responseOk: response.ok,
-        status: response.status,
-        endpoint,
-        source: "window.fetch",
-        mallId,
-        raw,
-        text: typeof raw === "string" ? raw.slice(0, 1000) : "",
-      };
-    },
-    { endpoint, url, body, providedMallId },
-  );
+  const response = await temuPageApiPost(page, {
+    origin: agentSellerOrigin,
+    endpoint,
+    body,
+    mallId: providedMallId,
+    label: "调价 API",
+  });
+  return {
+    responseOk: response.ok,
+    status: response.status,
+    endpoint: response.endpoint,
+    source: "window.fetch",
+    mallId: providedMallId || "",
+    raw: response.json || response.bodyText,
+    text: response.json ? "" : (response.bodyText || "").slice(0, 1000),
+  };
 }
 
 function assertPriceAdjustApiResult(response, label) {
@@ -516,7 +413,7 @@ async function priceAdjustApiResult(page, endpoint, body = {}, options = {}, lab
 
 async function priceAdjustApiMallList(page) {
   const result = await priceAdjustApiResult(page, "/api/seller/auth/userInfo", {}, {}, "店铺列表接口");
-  const malls = result.mallList || [];
+  const malls = extractMallList(result);
   if (!Array.isArray(malls) || malls.length === 0) {
     fail("PRICE_ADJUST_API_MALL_LIST_EMPTY", "店铺列表接口没有返回可用店铺");
   }
@@ -524,18 +421,22 @@ async function priceAdjustApiMallList(page) {
 }
 
 function mallInfoForShop(malls, shopName) {
-  const matches = (malls || []).filter((mall) => cleanText(mall.mallName) === shopName);
-  if (matches.length !== 1) {
-    fail("PRICE_ADJUST_API_SHOP_NOT_FOUND", `店铺列表接口中找不到唯一精确店名：${shopName}；匹配数=${matches.length}`);
+  let resolved;
+  try {
+    resolved = resolveMallByExactName(malls, shopName);
+  } catch (error) {
+    const message = errorMessage(error);
+    if (message.includes("缺少 mallId")) {
+      fail("PRICE_ADJUST_API_MALL_ID_MISSING", message);
+    }
+    fail("PRICE_ADJUST_API_SHOP_NOT_FOUND", message);
   }
 
-  const mall = matches[0];
-  const mallId = cleanText(mall.mallId);
-  if (!mallId) fail("PRICE_ADJUST_API_MALL_ID_MISSING", `店铺列表接口中 ${shopName} 缺少 mallId`);
+  const mall = resolved.raw;
   return {
     source: "api",
-    mallId,
-    mallName: cleanText(mall.mallName),
+    mallId: resolved.mallId,
+    mallName: resolved.mallName,
     managedType: mall.managedType ?? null,
     mallMode: mall.mallMode ?? null,
     uniqueId: mall.uniqueId || "",

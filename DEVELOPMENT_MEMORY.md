@@ -169,23 +169,23 @@ New shared helpers:
 - `scripts/temu-mall-resolver.mjs`: exact-only mall resolver for
   `userInfo -> mallList -> mallName -> mallId`.
 
-Current example consumer:
+Current consumers:
 
 - `scripts/temu-operation-status.mjs`
+- `scripts/temu-abnormal-orders.mjs`
+- `scripts/temu-price-adjust-reject.mjs`
 
-The operation-status script now demonstrates the intended split:
+These scripts now demonstrate the intended split:
 
 - login/authentication stays in `scripts/temu-login-helper.mjs`;
 - page-context API transport stays in `scripts/temu-page-api-client.mjs`;
 - exact mall lookup stays in `scripts/temu-mall-resolver.mjs`;
-- operation-status keeps only business-specific product status collection,
-  comparison, JSON formatting, and message summarization.
+- each consumer keeps only its own business-specific collection, validation,
+  JSON formatting, and message summarization.
 
 Other scripts are not migrated yet:
 
-- `scripts/temu-abnormal-orders.mjs`
 - `scripts/temu-shop-funds.mjs`
-- `scripts/temu-price-adjust-reject.mjs`
 - `scripts/temu-report.mjs`
 
 Future scanner work should migrate those scripts incrementally, one consumer at
