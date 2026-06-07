@@ -75,6 +75,14 @@ export function isSellerAuthorizeText(text) {
   return /授权登录|确认授权并前往|授权并前往|同意并登录/.test(text);
 }
 
+export function isSellerSubmittingText(text) {
+  return /登录中|授权中|提交中|正在登录|正在授权/.test(text);
+}
+
+export function isSellerKeyFailureText(text) {
+  return /获取公钥失败|公钥.*失败|请刷新页面/.test(text);
+}
+
 export async function bodyText(page, timeout = 10000) {
   return await page.locator("body").innerText({ timeout }).catch(() => "");
 }
@@ -276,6 +284,9 @@ export async function clickSellerLoginButton(page) {
     return true;
   }
 
+  const beforeText = await bodyText(page, 3000);
+  if (isSellerSubmittingText(beforeText)) return true;
+
   await page.keyboard.press("Enter").catch(() => {});
   await page.waitForTimeout(500).catch(() => {});
   const text = await bodyText(page, 3000);
@@ -345,6 +356,12 @@ async function sellerLoginState(page) {
   const hasAuthorizeButton = !hasPassword && Boolean(await sellerAuthorizeButtonPoint(page).catch(() => null));
   const isLoginUrl = isSellerLoginUrl(url);
 
+  if (isLoginUrl && isSellerKeyFailureText(text)) {
+    return { type: "seller_reload_required", text };
+  }
+  if ((isLoginUrl || hasLoginText || hasAuthorizeText) && isSellerSubmittingText(text)) {
+    return { type: "seller_submitting", text };
+  }
   if ((isSellerAuthorizeUrl(url) || isSellerCenterUrl(url)) && !hasPassword && (hasAuthorizeText || hasAuthorizeButton)) {
     return { type: "seller_authorize", text };
   }
@@ -382,7 +399,11 @@ export async function loginSellerIfNeeded(context, page, options = {}) {
 
   const maxAttempts = options.maxAttempts ?? 2;
   const maxPendingWaitMs = options.maxPendingWaitMs ?? 12000;
+  const maxSubmittingWaitMs = options.maxSubmittingWaitMs ?? 12000;
+  const maxSubmittingReloads = options.maxSubmittingReloads ?? 1;
   let pendingStartedAt = null;
+  let submittingStartedAt = null;
+  let submittingReloads = 0;
   let attempt = 0;
 
   while (attempt < maxAttempts) {
@@ -397,15 +418,50 @@ export async function loginSellerIfNeeded(context, page, options = {}) {
       await wait(300);
       continue;
     }
+    if (state.type === "seller_reload_required") {
+      if (submittingReloads >= maxSubmittingReloads) {
+        failWith(options, "notSubmitted", "SELLER_LOGIN_NOT_SUBMITTED", "卖家中心登录获取公钥失败，刷新后仍未恢复");
+      }
+      options.debug?.(`loginSellerIfNeeded reload url=${activePage.url()} reason=key_failure`);
+      submittingReloads += 1;
+      pendingStartedAt = null;
+      submittingStartedAt = null;
+      await activePage.reload({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
+      await activePage.waitForTimeout(1200).catch(() => {});
+      continue;
+    }
     if (state.type === "seller_pending") {
       pendingStartedAt ||= Date.now();
       if (Date.now() - pendingStartedAt > maxPendingWaitMs) {
-        failWith(options, "notSubmitted", "SELLER_LOGIN_NOT_SUBMITTED", "卖家中心登录页加载未完成");
+        failWith(
+          options,
+          "notSubmitted",
+          "SELLER_LOGIN_NOT_SUBMITTED",
+          "卖家中心登录页加载未完成",
+        );
+      }
+      await activePage.waitForTimeout(500).catch(() => {});
+      continue;
+    }
+    if (state.type === "seller_submitting") {
+      submittingStartedAt ||= Date.now();
+      if (Date.now() - submittingStartedAt > maxSubmittingWaitMs) {
+        if (submittingReloads < maxSubmittingReloads && isSellerLoginUrl(activePage.url())) {
+          options.debug?.(`loginSellerIfNeeded reload url=${activePage.url()} reason=submitting_timeout`);
+          submittingReloads += 1;
+          pendingStartedAt = null;
+          submittingStartedAt = null;
+          await activePage.reload({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
+          await activePage.waitForTimeout(1200).catch(() => {});
+          continue;
+        }
+        failWith(options, "notSubmitted", "SELLER_LOGIN_NOT_SUBMITTED", "卖家中心登录提交未完成");
       }
       await activePage.waitForTimeout(500).catch(() => {});
       continue;
     }
     pendingStartedAt = null;
+    submittingStartedAt = null;
     if (state.type === "verification_required") {
       failWith(options, "verificationRequired", "SELLER_LOGIN_VERIFICATION_REQUIRED", "卖家中心登录需要短信或验证码");
     }
@@ -436,8 +492,9 @@ export async function loginSellerIfNeeded(context, page, options = {}) {
       if (afterFillState.type === "verification_required") {
         failWith(options, "verificationRequired", "SELLER_LOGIN_VERIFICATION_REQUIRED", "卖家中心登录需要短信或验证码");
       }
-      if (afterFillState.type === "seller_pending") {
-        pendingStartedAt = Date.now();
+      if (afterFillState.type === "seller_pending" || afterFillState.type === "seller_submitting" || afterFillState.type === "seller_reload_required") {
+        pendingStartedAt = afterFillState.type === "seller_pending" ? Date.now() : null;
+        submittingStartedAt = afterFillState.type === "seller_submitting" ? Date.now() : null;
         await activePage.waitForTimeout(500).catch(() => {});
         continue;
       }
@@ -476,8 +533,9 @@ export async function loginSellerIfNeeded(context, page, options = {}) {
       failWith(options, "verificationRequired", "SELLER_LOGIN_VERIFICATION_REQUIRED", "卖家中心登录需要短信或验证码");
     }
     if (afterState.type === "ready") return activePage;
-    if (afterState.type === "seller_pending" || afterState.type === "transition_closed") {
+    if (afterState.type === "seller_pending" || afterState.type === "seller_submitting" || afterState.type === "seller_reload_required" || afterState.type === "transition_closed") {
       pendingStartedAt = afterState.type === "seller_pending" ? Date.now() : null;
+      submittingStartedAt = afterState.type === "seller_submitting" ? Date.now() : null;
       await activePage.waitForTimeout(500).catch(() => {});
       continue;
     }

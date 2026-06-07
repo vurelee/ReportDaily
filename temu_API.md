@@ -2,7 +2,7 @@
 
 ## 目标
 
-本文档记录 `/Users/vure/ReportDalily` 当前调用 `agentseller.temu.com` 页面内 API 的技术细节，供后续扩展其它 AgentSeller 页面接口时复用。
+# 本文档记录 `/Users/vure/ReportDalily` 当前调用 `agentseller.temu.com` 页面内 API 的技术细节，供后续扩展其它 AgentSeller 页面接口时复用。
 
 当前实现不是 DOM 表格采集，也不是纯 Node HTTP 请求；它是 **browser-authenticated API-first**：
 
