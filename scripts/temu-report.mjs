@@ -6,7 +6,7 @@ import { connectCdpChrome } from "./chrome-cdp.mjs";
 import { closeCdpChromeProcess, closeCdpPages } from "./cdp-page-cleanup.mjs";
 import { closeTemuPopups } from "./temu-popup-cleaner.mjs";
 import { createTemuNetworkCapture } from "./temu-network-capture.mjs";
-import { ensureConsentChecked } from "./temu-consent-helper.mjs";
+import { loginSellerIfNeeded } from "./temu-login-helper.mjs";
 
 const now = new Date();
 const stamp = now.toISOString().replace(/[:.]/g, "-");
@@ -415,127 +415,6 @@ async function clickNonLocalSellerLogin(page) {
   return true;
 }
 
-async function visibleInputMeta(page) {
-  return await page.locator("input").evaluateAll((nodes) =>
-    nodes.map((input, index) => ({
-      index,
-      type: input.getAttribute("type") || "text",
-      placeholder: input.getAttribute("placeholder") || "",
-      valueLength: input.value?.length || 0,
-      visible: !!(input.offsetWidth || input.offsetHeight || input.getClientRects().length),
-    })),
-  );
-}
-
-function findLoginInputIndexes(inputs) {
-  const visible = inputs.filter((input) => input.visible);
-  const password = visible.find((input) => input.type === "password");
-  const username =
-    visible.find((input) => /手机|邮箱|账号|email|phone/i.test(input.placeholder)) ||
-    visible.find((input) => input.type === "text" && input.placeholder);
-
-  return {
-    usernameIndex: username?.index ?? -1,
-    passwordIndex: password?.index ?? -1,
-  };
-}
-
-async function valuesByInputIndex(page, indexes) {
-  return await page.locator("input").evaluateAll(
-    (nodes, indexes) =>
-      Object.fromEntries(
-        indexes.map((index) => [index, nodes[index]?.value || ""]),
-      ),
-    indexes,
-  );
-}
-
-async function trySavedPasswordAutofill(page) {
-  for (const tab of ["", "邮箱登录", "手机号登录"]) {
-    if (tab) {
-      await page.getByText(tab, { exact: true }).click({ timeout: 3000 }).catch(() => {});
-      await page.waitForTimeout(800).catch(() => {});
-      if (page.isClosed()) return true;
-    }
-
-    const inputs = await visibleInputMeta(page);
-    const { usernameIndex, passwordIndex } = findLoginInputIndexes(inputs);
-    if (usernameIndex < 0 || passwordIndex < 0) continue;
-
-    const username = page.locator("input").nth(usernameIndex);
-    const password = page.locator("input").nth(passwordIndex);
-
-    for (const field of [username, password, username]) {
-      await field.click({ timeout: 3000 }).catch(() => {});
-      await page.keyboard.press("ArrowDown").catch(() => {});
-      await page.waitForTimeout(250);
-      await page.keyboard.press("Enter").catch(() => {});
-      await page.waitForTimeout(800).catch(() => {});
-      if (page.isClosed()) return true;
-    }
-
-    const values = await valuesByInputIndex(page, [usernameIndex, passwordIndex]);
-    if ((values[usernameIndex] || "").length > 0 && (values[passwordIndex] || "").length > 0) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function configuredCredentials() {
-  const account =
-    process.env.TEMU_LOGIN_ACCOUNT ||
-    process.env.TEMU_LOGIN_PHONE ||
-    process.env.TEMU_LOGIN_EMAIL ||
-    "";
-  const password = process.env.TEMU_LOGIN_PASSWORD || "";
-  return { account, password };
-}
-
-async function tryConfiguredCredentials(page) {
-  const { account, password } = configuredCredentials();
-  if (!account || !password) return false;
-
-  const preferredTab = account.includes("@") ? "邮箱登录" : "手机号登录";
-  await page.getByText(preferredTab, { exact: true }).click({ timeout: 3000 }).catch(() => {});
-  await page.waitForTimeout(800);
-
-  const inputs = await visibleInputMeta(page);
-  const { usernameIndex, passwordIndex } = findLoginInputIndexes(inputs);
-  if (usernameIndex < 0 || passwordIndex < 0) return false;
-
-  await page.locator("input").nth(usernameIndex).fill(account, { timeout: 5000 });
-  await page.locator("input").nth(passwordIndex).fill(password, { timeout: 5000 });
-  return true;
-}
-
-async function clickAuthorizeLogin(page) {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    if (!(await ensureConsentChecked(page))) {
-      fail("AUTO_LOGIN_CONSENT_NOT_CHECKED", "授权复选框未成功勾选");
-    }
-
-    const authButton = page.locator("button").filter({ hasText: /授权登录|登录/ }).last();
-    const clicked =
-      ((await authButton.count().catch(() => 0)) > 0 &&
-        (await authButton.click({ timeout: 5000 }).then(() => true).catch(() => false))) ||
-      (await clickTextByRect(page, "授权登录", (rects) =>
-        rects.sort((a, b) => b.y - a.y)[0] || null,
-      )) ||
-      (await clickTextByRect(page, "登录", (rects) =>
-        rects.sort((a, b) => b.y - a.y)[0] || null,
-      ));
-
-    if (!clicked) fail("AUTO_LOGIN_AUTHORIZE_BUTTON_NOT_FOUND", "找不到授权登录按钮");
-
-    await page.waitForTimeout(2500).catch(() => {});
-    if (page.isClosed()) return;
-    const text = await bodyText(page).catch(() => "");
-    if (!text.includes("授权登录") && !text.includes("手机号登录") && !text.includes("邮箱登录")) return;
-  }
-}
-
 async function waitForMatchingPage(context, predicate, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -591,30 +470,45 @@ async function attemptAutoLogin(context, page) {
   if (await isLoggedIn(sellerPage)) return sellerPage;
 
   text = await bodyText(sellerPage);
-  if (!text.includes("授权登录") && !text.includes("密码")) {
+  if (
+    !text.includes("授权登录") &&
+    !text.includes("确认授权并前往") &&
+    !text.includes("授权并前往") &&
+    !text.includes("同意并登录") &&
+    !text.includes("手机号登录") &&
+    !text.includes("邮箱登录") &&
+    !text.includes("密码")
+  ) {
     fail("AUTO_LOGIN_FORM_NOT_FOUND", "卖家中心登录表单未出现");
   }
 
-  if (!(await ensureConsentChecked(sellerPage))) {
-    fail("AUTO_LOGIN_CONSENT_NOT_CHECKED", "授权复选框未成功勾选");
-  }
+  const sellerLoginPage = await loginSellerIfNeeded(context, sellerPage, {
+    fail,
+    errorCodes: {
+      buttonNotFound: "AUTO_LOGIN_AUTHORIZE_BUTTON_NOT_FOUND",
+      consentNotChecked: "AUTO_LOGIN_CONSENT_NOT_CHECKED",
+      notSubmitted: "LOGIN_STATE_UNAVAILABLE",
+      passwordNotFilled: "AUTO_LOGIN_PASSWORD_NOT_FILLED",
+      verificationRequired: "AUTO_LOGIN_VERIFICATION_REQUIRED",
+    },
+    messages: {
+      buttonNotFound: "找不到授权登录按钮",
+      consentNotChecked: "授权复选框未成功勾选",
+      notSubmitted: "自动登录后仍未进入 Temu 后台",
+      passwordNotFilled: "Chrome 保存密码未自动填充，且没有运行时账号密码",
+      verificationRequired: "登录需要短信或验证码",
+    },
+  });
 
-  const hasSavedCredentials = await trySavedPasswordAutofill(sellerPage);
   if (sellerPage.isClosed()) {
     const loggedInPage = await waitForLoggedInPage(context, 20000);
     if (loggedInPage) return loggedInPage;
     fail("AUTO_LOGIN_PAGE_CLOSED", "卖家中心登录页已关闭，但未找到已登录后台页");
   }
 
-  const hasCredentials = hasSavedCredentials || (await tryConfiguredCredentials(sellerPage));
-  if (!hasCredentials) {
-    fail("AUTO_LOGIN_PASSWORD_NOT_FILLED", "Chrome 保存密码未自动填充，且没有运行时账号密码");
-  }
-
-  await clickAuthorizeLogin(sellerPage);
   await new Promise((resolve) => setTimeout(resolve, 8000));
 
-  const afterLoginText = await bodyText(sellerPage).catch(() => "");
+  const afterLoginText = await bodyText(sellerLoginPage || sellerPage).catch(() => "");
   if (/验证码|短信|verification/i.test(afterLoginText) && !isLoggedInText(afterLoginText)) {
     fail("AUTO_LOGIN_VERIFICATION_REQUIRED", "登录需要短信或验证码");
   }
@@ -622,6 +516,7 @@ async function attemptAutoLogin(context, page) {
   const loggedInPage =
     (await waitForLoggedInPage(context, 20000)) ||
     context.pages().find((candidate) => /ads\.temu\.com/.test(candidate.url()) && !candidate.url().includes("login.html")) ||
+    sellerLoginPage ||
     sellerPage;
 
   await loggedInPage.goto(config.temuHomeUrl, { waitUntil: "domcontentloaded" }).catch(() => {});

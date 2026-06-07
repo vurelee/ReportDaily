@@ -32,12 +32,14 @@ function consentPageProbe() {
   const selector = checkboxSelectors.join(",");
   const allCheckboxes = Array.from(document.querySelectorAll(selector));
   const visibleCheckboxes = allCheckboxes.filter(isVisible);
+  const priorityConsentPattern = /账号ID|店铺名称|各板块共享/;
   const textNodes = Array.from(document.querySelectorAll("label,div,span,p")).filter((node) => {
     if (!isVisible(node)) return false;
     const rect = node.getBoundingClientRect();
-    if (rect.width > 720 || rect.height > 120) return false;
     const text = normalize(node.innerText || node.textContent);
-    return consentPattern.test(text) && text.length > 6 && text.length < 500;
+    if (!consentPattern.test(text) || text.length <= 6 || text.length >= 500) return false;
+    if (priorityConsentPattern.test(text)) return rect.height <= 180;
+    return rect.width <= 720 && rect.height <= 120;
   });
   const checkboxText = (node) => {
     const row =

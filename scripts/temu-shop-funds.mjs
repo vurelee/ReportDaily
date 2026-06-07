@@ -5,7 +5,13 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { closeCdpChromeProcess, closeCdpPages } from "./cdp-page-cleanup.mjs";
-import { ensureConsentChecked } from "./temu-consent-helper.mjs";
+import {
+  enterAgentAuthenticationIfShown,
+  isAgentAuthenticationUrl,
+  loginSellerIfNeeded,
+  needsVerification,
+  waitForMatchingPage,
+} from "./temu-login-helper.mjs";
 import { closeTemuPopups } from "./temu-popup-cleaner.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -298,225 +304,8 @@ async function bodyText(page, timeout = 10000) {
   return await page.locator("body").innerText({ timeout }).catch(() => "");
 }
 
-async function visibleInputMeta(page) {
-  return await page.locator("input").evaluateAll((nodes) =>
-    nodes.map((input, index) => ({
-      index,
-      type: input.getAttribute("type") || "text",
-      placeholder: input.getAttribute("placeholder") || "",
-      valueLength: input.value?.length || 0,
-      visible: !!(input.offsetWidth || input.offsetHeight || input.getClientRects().length),
-    })),
-  );
-}
-
-function findLoginInputIndexes(inputs) {
-  const visible = inputs.filter((input) => input.visible);
-  const password = visible.find((input) => input.type === "password");
-  const username =
-    visible.find((input) => /手机|邮箱|账号|email|phone/i.test(input.placeholder)) ||
-    visible.find((input) => input.type === "text" && input.placeholder);
-  return {
-    usernameIndex: username?.index ?? -1,
-    passwordIndex: password?.index ?? -1,
-  };
-}
-
-async function valuesByInputIndex(page, indexes) {
-  return await page.locator("input").evaluateAll(
-    (nodes, indexes) => Object.fromEntries(indexes.map((index) => [index, nodes[index]?.value || ""])),
-    indexes,
-  );
-}
-
-async function trySavedPasswordAutofill(page) {
-  let rememberedPhone = "";
-
-  for (const tab of ["", "手机号登录", "邮箱登录", "手机号登录"]) {
-    if (tab) {
-      await page.getByText(tab, { exact: true }).click({ timeout: 3000 }).catch(() => {});
-      await page.waitForTimeout(800);
-      await ensureConsentChecked(page).catch(() => {});
-    }
-
-    const inputs = await visibleInputMeta(page);
-    const { usernameIndex, passwordIndex } = findLoginInputIndexes(inputs);
-    if (usernameIndex < 0 || passwordIndex < 0) continue;
-
-    const username = page.locator("input").nth(usernameIndex);
-    const password = page.locator("input").nth(passwordIndex);
-    for (const field of [username, password, username]) {
-      await field.click({ timeout: 3000 }).catch(() => {});
-      await page.keyboard.press("ArrowDown").catch(() => {});
-      await page.waitForTimeout(250);
-      await page.keyboard.press("Enter").catch(() => {});
-      await page.waitForTimeout(800);
-    }
-
-    const values = await valuesByInputIndex(page, [usernameIndex, passwordIndex]);
-    const usernameValue = values[usernameIndex] || "";
-    const passwordValue = values[passwordIndex] || "";
-    const usernameMeta = inputs.find((input) => input.index === usernameIndex);
-    const isEmailForm = /邮箱|email|子账号邮箱/i.test(usernameMeta?.placeholder || "");
-    const isPhoneForm = /手机|phone/i.test(usernameMeta?.placeholder || "");
-
-    if (isEmailForm && usernameValue && !usernameValue.includes("@")) {
-      rememberedPhone = usernameValue.replace(/\D/g, "") || usernameValue;
-      continue;
-    }
-
-    if (isPhoneForm && !usernameValue && rememberedPhone && passwordValue) {
-      await username.fill(rememberedPhone, { timeout: 5000 });
-      await page.waitForTimeout(300);
-      return true;
-    }
-
-    if (usernameValue.length > 0 && passwordValue.length > 0) {
-      return true;
-    }
-  }
-  return false;
-}
-
-async function tryConfiguredCredentials(page) {
-  const account =
-    process.env.TEMU_LOGIN_ACCOUNT ||
-    process.env.TEMU_LOGIN_PHONE ||
-    process.env.TEMU_LOGIN_EMAIL ||
-    "";
-  const password = process.env.TEMU_LOGIN_PASSWORD || "";
-  if (!account || !password) return false;
-
-  await page.getByText(account.includes("@") ? "邮箱登录" : "手机号登录", { exact: true }).click({ timeout: 3000 }).catch(() => {});
-  await page.waitForTimeout(800);
-  await ensureConsentChecked(page).catch(() => {});
-
-  const inputs = await visibleInputMeta(page);
-  const { usernameIndex, passwordIndex } = findLoginInputIndexes(inputs);
-  if (usernameIndex < 0 || passwordIndex < 0) return false;
-
-  await page.locator("input").nth(usernameIndex).fill(account, { timeout: 5000 });
-  await page.locator("input").nth(passwordIndex).fill(password, { timeout: 5000 });
-  return true;
-}
-
-async function clickCdpPoint(page, x, y) {
-  const client = await page.context().newCDPSession(page);
-  try {
-    await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none" });
-    await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
-    await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
-  } finally {
-    await client.detach().catch(() => {});
-  }
-  await page.waitForTimeout(300).catch(() => {});
-}
-
-function needsLogin(text, page) {
-  return page.url().includes("/login") || text.includes("扫码登录") || text.includes("手机号登录") || text.includes("邮箱登录");
-}
-
-function needsVerification(text) {
-  return /短信验证码|手机验证码|安全验证|验证身份|获取验证码|发送验证码|拖动滑块|verification/i.test(text);
-}
-
-async function loginSellerCenterIfNeeded(page) {
-  let text = await bodyText(page, 3000);
-  if (!needsLogin(text, page)) return;
-  if (needsVerification(text)) fail("SELLER_LOGIN_VERIFICATION_REQUIRED", "卖家中心登录需要短信或验证码");
-
-  const filled = (await trySavedPasswordAutofill(page)) || (await tryConfiguredCredentials(page));
-  if (!filled) {
-    fail("SELLER_LOGIN_PASSWORD_NOT_FILLED", "卖家中心登录页未能自动填充密码，且没有运行时账号密码");
-  }
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    await ensureConsentChecked(page).catch(() => {});
-    const button = await sellerAuthorizeButtonPoint(page);
-    if (!button) fail("SELLER_LOGIN_BUTTON_NOT_FOUND", "找不到卖家中心登录按钮");
-    await clickCdpPoint(page, button.x, button.y);
-    await page.waitForTimeout(5000).catch(() => {});
-
-    text = await bodyText(page, 3000);
-    if (needsVerification(text)) fail("SELLER_LOGIN_VERIFICATION_REQUIRED", "卖家中心登录需要短信或验证码");
-    if (!needsLogin(text, page)) return;
-  }
-
-  fail("SELLER_LOGIN_NOT_SUBMITTED", "卖家中心登录仍停留在登录页，请检查协议勾选或登录提示");
-}
-
 function agentTargetUrl(region) {
   return `${region.origin}/labor/settle`;
-}
-
-function isAgentAuthUrl(url) {
-  return /^https:\/\/agentseller(?:-[a-z]+)?\.temu\.com\/auth\/authentication/.test(url);
-}
-
-async function waitForMatchingPage(context, predicate, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const matched = [...context.pages()].reverse().find((candidate) => !candidate.isClosed() && predicate(candidate));
-    if (matched) return matched;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  return null;
-}
-
-async function agentChinaSellerCenterPoint(page) {
-  return await page.evaluate(() => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-    const isVisible = (node) => {
-      const rect = node.getBoundingClientRect();
-      const style = window.getComputedStyle(node);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    };
-
-    for (const node of document.querySelectorAll("button, a, div, span")) {
-      if (!isVisible(node)) continue;
-      if (clean(node.innerText || node.textContent) !== "商家中心") continue;
-      if (window.getComputedStyle(node).cursor === "not-allowed") continue;
-
-      let parent = node;
-      let inChinaRegion = false;
-      for (let depth = 0; depth < 7 && parent; depth += 1, parent = parent.parentElement) {
-        const text = clean(parent.innerText || parent.textContent);
-        if (text.includes("中国地区") && text.includes("商家中心") && !text.includes("敬请期待")) {
-          inChinaRegion = true;
-          break;
-        }
-      }
-      if (!inChinaRegion) continue;
-
-      const rect = node.getBoundingClientRect();
-      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-    }
-    return null;
-  });
-}
-
-async function sellerAuthorizeButtonPoint(page) {
-  return await page.evaluate(() => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-    const isVisible = (node) => {
-      const rect = node.getBoundingClientRect();
-      const style = window.getComputedStyle(node);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    };
-    const labels = new Set(["确认授权并前往", "授权并前往", "授权登录", "同意并登录", "登录"]);
-    return Array.from(document.querySelectorAll('button, a, div[role="button"], span, div'))
-      .filter((node) => isVisible(node) && labels.has(clean(node.innerText || node.textContent)))
-      .map((node) => {
-        const rect = node.getBoundingClientRect();
-        return {
-          tag: node.tagName,
-          x: rect.x + rect.width / 2,
-          y: rect.y + rect.height / 2,
-          area: rect.width * rect.height,
-        };
-      })
-      .sort((a, b) => (a.tag === "BUTTON" ? 0 : 1) - (b.tag === "BUTTON" ? 0 : 1) || a.area - b.area)[0] || null;
-  });
 }
 
 async function authorizeSellerPage(context, page, region) {
@@ -527,24 +316,20 @@ async function authorizeSellerPage(context, page, region) {
       8000,
     )) || page;
 
-  for (let attempt = 0; attempt < 80; attempt += 1) {
-    const text = await bodyText(sellerPage, 300);
-    if (/确认授权并前往|授权登录|授权并前往/.test(text)) break;
-    if (needsVerification(text)) {
-      fail("AGENT_SELLER_VERIFICATION_REQUIRED", `${region.label} AgentSeller 授权需要短信或验证码`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-
-  const text = await bodyText(sellerPage, 1000);
-  if (needsVerification(text)) {
-    fail("AGENT_SELLER_VERIFICATION_REQUIRED", `${region.label} AgentSeller 授权需要短信或验证码`);
-  }
-  await ensureConsentChecked(sellerPage).catch(() => {});
-  const button = await sellerAuthorizeButtonPoint(sellerPage);
-  if (!button) fail("AGENT_SELLER_AUTH_BUTTON_NOT_FOUND", `${region.label} AgentSeller 授权页找不到授权按钮`);
-  await clickCdpPoint(sellerPage, button.x, button.y);
-  await sellerPage.waitForTimeout(4500).catch(() => {});
+  return (
+    (await loginSellerIfNeeded(context, sellerPage, {
+      fail,
+      errorCodes: {
+        buttonNotFound: "AGENT_SELLER_AUTH_BUTTON_NOT_FOUND",
+        verificationRequired: "AGENT_SELLER_VERIFICATION_REQUIRED",
+      },
+      messages: {
+        buttonNotFound: `${region.label} AgentSeller 授权页找不到授权按钮`,
+        verificationRequired: `${region.label} AgentSeller 授权需要短信或验证码`,
+      },
+      afterClickTimeoutMs: 4500,
+    })) || sellerPage
+  );
 }
 
 async function ensureAgentSettlePage(context, page, region) {
@@ -560,15 +345,16 @@ async function ensureAgentSettlePage(context, page, region) {
     }
     if (!activePage.isClosed() && activePage.url().startsWith(target)) return activePage;
 
-    if (!activePage.isClosed() && isAgentAuthUrl(activePage.url())) {
-      const point = await agentChinaSellerCenterPoint(activePage);
-      if (!point) fail("AGENT_AUTH_ENTRY_NOT_FOUND", `${region.label} AgentSeller 认证页找不到中国地区商家中心入口`);
-      await clickCdpPoint(activePage, point.x, point.y);
-      await authorizeSellerPage(context, activePage, region);
+    if (!activePage.isClosed() && isAgentAuthenticationUrl(activePage.url())) {
+      const authPage = await enterAgentAuthenticationIfShown(context, activePage);
+      if (!authPage || isAgentAuthenticationUrl(authPage.url())) {
+        fail("AGENT_AUTH_ENTRY_NOT_FOUND", `${region.label} AgentSeller 认证页找不到中国地区商家中心入口`);
+      }
+      activePage = await authorizeSellerPage(context, authPage, region);
       activePage =
         (await waitForMatchingPage(
           context,
-          (candidate) => candidate.url().startsWith(region.origin) && !isAgentAuthUrl(candidate.url()),
+          (candidate) => candidate.url().startsWith(region.origin) && !isAgentAuthenticationUrl(candidate.url()),
           10000,
         )) || activePage;
       continue;
@@ -579,7 +365,7 @@ async function ensureAgentSettlePage(context, page, region) {
       activePage =
         (await waitForMatchingPage(
           context,
-          (candidate) => candidate.url().startsWith(region.origin) && !isAgentAuthUrl(candidate.url()),
+          (candidate) => candidate.url().startsWith(region.origin) && !isAgentAuthenticationUrl(candidate.url()),
           10000,
         )) || activePage;
       continue;
@@ -791,9 +577,16 @@ async function ensureFundsPage(context, page) {
 
   const text = await bodyText(activePage);
   if (needsVerification(text)) fail("SELLER_LOGIN_VERIFICATION_REQUIRED", "卖家中心登录需要短信或验证码");
-  if (needsLogin(text, activePage)) {
-    await loginSellerCenterIfNeeded(activePage);
-  }
+  activePage =
+    (await loginSellerIfNeeded(context, activePage, {
+      fail,
+      errorCodes: {
+        passwordNotFilled: "SELLER_LOGIN_AUTOFILL_NOT_CONFIRMED",
+      },
+      messages: {
+        passwordNotFilled: "卖家中心登录自动填充或登录完成状态未确认，且没有运行时账号密码",
+      },
+    })) || activePage;
   if (!activePage.url().startsWith(targetUrl)) {
     activePage = (await waitForSellerPage(context, 3000)) || activePage;
   }
