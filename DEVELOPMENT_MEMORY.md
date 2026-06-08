@@ -37,7 +37,7 @@ flowchart TB
     Abnormal["temu-abnormal-orders.mjs<br/>AgentSeller abnormal orders"]
     Operation["temu-operation-status.mjs<br/>AgentSeller operation status"]
     Price["temu-price-adjust-reject.mjs<br/>AgentSeller price-adjust reject"]
-    Future["future scanner, for example temu-orders.mjs<br/>new order API collection"]
+    OrderIncome["temu-order-sales-income.mjs<br/>AgentSeller order sales income"]
   end
 
   MallResolver --> Product
@@ -45,31 +45,30 @@ flowchart TB
   MallResolver --> Abnormal
   MallResolver --> Operation
   MallResolver --> Price
-  MallResolver --> Future
+  MallResolver --> OrderIncome
 
   Product --> Reports["temu-reports/*.json"]
   Funds --> Reports
   Abnormal --> Reports
   Operation --> Reports
   Price --> Reports
-  Future --> Reports
+  OrderIncome --> Reports
 
   Reports --> Summary["summary / markdown / image scripts"]
   Summary --> WeCom["wecom-send.mjs<br/>Enterprise WeChat webhook"]
 ```
 
-When adding a new feature such as order data:
+When adding or changing order-income collection:
 
-- create a new consumer script such as `scripts/temu-orders.mjs`;
-- start from the correct logged-in backend page, usually AgentSeller or Seller
-  Center, then let `loginSellerIfNeeded()` settle auth;
-- use `temuPageApiPost()` for browser-authenticated API calls;
+- keep using `scripts/temu-order-sales-income.mjs` as the dedicated consumer;
+- start from each region's AgentSeller order page, then let
+  `loginSellerIfNeeded()` settle auth;
+- use page-context requests for browser-authenticated API calls and detail HTML;
 - resolve target shops through `resolveMallByExactName()` and exact
   `temu-accounts.json` shop names;
-- first test whether the endpoint honors `mallid`; only use a backend switch API
-  when direct `mallid` scoping is ignored;
-- write stable JSON under `temu-reports/` first, then add image or WeCom delivery
-  only after the data script is reliable.
+- keep DOM shop switching enabled by default for this scanner;
+- write stable JSON under `temu-reports/` before adding any image or WeCom
+  delivery layer.
 
 ## 2026-06-07 Seller Center Login Refactor
 
