@@ -42,16 +42,12 @@ if [[ -z "${TEMU_PRODUCT_SOURCE:-}" ]]; then
 fi
 
 case "$TEMU_PRODUCT_SOURCE" in
-  dom|api) ;;
+  api) ;;
   *)
-    echo "TEMU_PRODUCT_SOURCE must be dom or api; got: $TEMU_PRODUCT_SOURCE" >&2
+    echo "TEMU_PRODUCT_SOURCE must be api; got: $TEMU_PRODUCT_SOURCE" >&2
     exit 2
     ;;
 esac
-
-if [[ -z "${TEMU_API_DOM_FALLBACK:-}" ]]; then
-  export TEMU_API_DOM_FALLBACK="1"
-fi
 
 max_attempts="${TEMU_CODEX_MAX_ATTEMPTS:-2}"
 retry_delay="${TEMU_CODEX_RETRY_DELAY_SECONDS:-15}"
@@ -110,7 +106,7 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-log_audit "start: pid=$$ ppid=$PPID report_date=$TEMU_REPORT_DATE product_source=$TEMU_PRODUCT_SOURCE api_dom_fallback=$TEMU_API_DOM_FALLBACK pwd=$PWD path=$PATH max_attempts=$max_attempts"
+log_audit "start: pid=$$ ppid=$PPID report_date=$TEMU_REPORT_DATE product_source=$TEMU_PRODUCT_SOURCE pwd=$PWD path=$PATH max_attempts=$max_attempts"
 
 if [[ "${TEMU_CODEX_WAKE_DISPLAY:-1}" != "0" ]]; then
   log_audit "preflight: wake_display delay=${wake_delay}s"

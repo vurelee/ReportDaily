@@ -6,14 +6,14 @@
 
 这套项目的稳定运行依赖本机 Chrome 登录态。浏览器控制方式是 **Playwright over CDP**：脚本通过 Playwright API 连接普通 Chrome 的 remote debugging port，复用独立 Chrome profile、已保存密码和登录 cookie。不要把登录改成纯 API；Temu 登录涉及短信、验证码、设备风控和动态请求头，推荐继续用 `npm run temu:login:cdp` 建立/修复登录态。
 
-产品广告报表现在是 **API 优先**：
+产品广告报表现在是 **API 采集**：
 
-- Codex 定时入口和 legacy wrapper 默认设置 `TEMU_PRODUCT_SOURCE=api`
+- Codex 定时入口、legacy wrapper 和直接运行默认都使用 `TEMU_PRODUCT_SOURCE=api`
 - API 切店使用 `POST /api/v1/coconut/account/mall_list?mallType=2` 和 `POST /api/v1/coconut/account/mall_switch?mallType=2&targetMallId=...`
 - 商品报表使用 `POST /api/v1/coconut/reports/queryReports` 和 `POST /api/v1/coconut/ad/ads_report`
 - `today` 和 `yesterday` 都使用 `time_type=1`，靠上海时区的 start/end 时间戳控制日期；不要改成 `time_type=2`
-- `TEMU_API_DOM_FALLBACK=0` 可关闭 DOM 兜底，用于验证接口路径是否真的可用
-- 需要临时回退旧页面采集时，设置 `TEMU_PRODUCT_SOURCE=dom`
+- Ads `ads_report` 会绑定当前 Ads session 店铺，`mallid` 请求头、请求体或 URL 参数不会直接分店；因此仍必须先调用 Ads API `mall_switch`
+- 产品广告日报数据阶段不再使用页面 UI 切店、区域/日期点击、表格解析或 DOM 兜底；接口失败会记录失败店铺
 
 出库单异常巡店现在也是 **API 优先**，入口是 `scripts/temu-abnormal-orders.mjs`。它仍先从 `https://agentseller.temu.com/lgst/auth-warehouse/abnormal-order` 建立 agentseller 登录/授权态，但逐店数据默认通过 `POST /api/seller/auth/userInfo` 精确取得 `mallId`，再带 `mallid` 请求 `POST /api/bg/cw/order/queryAbnormalOrderSum` 和 `POST /api/bg/cw/order/pageCwNormalOrderShippingInfo`。需要临时回退旧页面切店和页面读取时，设置 `TEMU_ABNORMAL_SOURCE=dom`；需要严格验证 API 路径时，设置 `TEMU_ABNORMAL_API_DOM_FALLBACK=0`。若触发短信或验证码，需要在对应 CDP Chrome profile 里人工完成后重跑。
 
@@ -26,7 +26,7 @@
 核心文件：
 
 - `temu-accounts.json`: 账号、CDP profile、端口、店铺列表和精确店名配置
-- `scripts/temu-report.mjs`: 单账号产品广告报表采集，包含 API 采集和 DOM 兜底
+- `scripts/temu-report.mjs`: 单账号产品广告报表采集，登录/授权后使用 Ads API 切店和采集
 - `scripts/temu-run-all.mjs`: 多账号产品广告报表合并
 - `scripts/temu-report-all-image-flow.mjs`: 正式交付顺序编排；子步骤失败立即停止，并把本轮生成的 JSON 路径显式传给发送脚本
 - `scripts/temu-abnormal-orders.mjs`: 出库单异常巡店
@@ -91,9 +91,9 @@ npm run temu:report:codex:today
 npm run temu:report:codex:yesterday
 ```
 
-Codex 入口会加载 `.env.local`、重置两个 CDP 端口、唤醒桌面、用 `caffeinate` 包住采集和发送流程，并把审计日志写入 `temu-reports/codex.audit.log`。产品广告报表默认使用接口切店和接口采集；出库单异常默认通过 agentseller API 用 `mallid` 分店拉取数量和明细。需要临时回退页面采集时，可分别设置 `TEMU_PRODUCT_SOURCE=dom` 或 `TEMU_ABNORMAL_SOURCE=dom`。命令失败时默认会重试一次；如果重试后仍失败，命令会保留非零退出码，让 Codex 自动化继续排查日志、修复脚本并重跑到完成。
+Codex 入口会加载 `.env.local`、重置两个 CDP 端口、唤醒桌面、用 `caffeinate` 包住采集和发送流程，并把审计日志写入 `temu-reports/codex.audit.log`。产品广告报表使用接口切店和接口采集；出库单异常默认通过 agentseller API 用 `mallid` 分店拉取数量和明细。出库单异常需要临时回退页面采集时，可设置 `TEMU_ABNORMAL_SOURCE=dom`。命令失败时默认会重试一次；如果重试后仍失败，命令会保留非零退出码，让 Codex 自动化继续排查日志、修复脚本并重跑到完成。
 
-汇总图片标题使用 `欧区销量汇总 YYYY-MM-DD HH:mm:ss`，时间取多账号脚本启动时间；副标题显示 `对比日期：上一日 HH:mm:ss`。图片顶部用两张加粗卡片展示总件数和总销售额，并在数值同一行显示相对上一日的红绿箭头百分比变化；下方按店铺分组列出商品图、总花费、净件数、净销售额、曝光量、点击率和转化率。店铺名只显示在小计行，小计行只展示该店铺件数和销售额，并分别在数值下方显示相对上一日的红绿箭头百分比变化，百分比不带矩形底色。图片中的商品明细每个店铺只展示净销售额前 5 且净销售额大于 0 的商品，完整商品明细仍保留在 JSON 中。夜间任务点击 `昨日` 并统计昨日数据，企业微信 markdown 文字口径仍使用昨日汇总。企业微信通过 `WECOM_WEBHOOK_URL` 群机器人 webhook 先发送 markdown 标题，再发送图片。
+汇总图片标题使用 `欧区销量汇总 YYYY-MM-DD HH:mm:ss`，时间取多账号脚本启动时间；副标题显示 `对比日期：上一日 HH:mm:ss`。图片顶部用两张加粗卡片展示总件数和总销售额，并在数值同一行显示相对上一日的红绿箭头百分比变化；下方按店铺分组列出商品图、总花费、净件数、净销售额、曝光量、点击率和转化率。店铺名只显示在小计行，小计行只展示该店铺件数和销售额，并分别在数值下方显示相对上一日的红绿箭头百分比变化，百分比不带矩形底色。图片中的商品明细每个店铺只展示净销售额前 5 且净销售额大于 0 的商品，完整商品明细仍保留在 JSON 中。夜间任务统计昨日数据，企业微信 markdown 文字口径仍使用昨日汇总。企业微信通过 `WECOM_WEBHOOK_URL` 群机器人 webhook 先发送 markdown 标题，再发送图片。
 
 ### 汇总图片和企业微信推送规则
 
@@ -182,7 +182,7 @@ npm run temu:abnormal:capture
 
 捕获文件保存到 `temu-reports/temu-network-capture-*.json`。请求头、查询参数和请求/响应体里的 cookie、token、sign、password 等敏感字段会脱敏。
 
-产品广告数据也可以走页面登录态下的接口采集和接口切店，默认失败时会回退到原页面采集：
+产品广告数据使用页面登录态下的接口采集和接口切店，接口失败会记录失败店铺：
 
 ```bash
 npm run temu:report:api
@@ -201,13 +201,10 @@ TEMU_ACCOUNT_ID=whitine-leeev npm run temu:abnormal
 
 - 打开 Temu 广告后台
 - 登录态失效时点击右上角登录，选择非当地卖家，并优先使用 Chrome 保存密码自动登录
-- 登录后先确认当前店铺名；产品报表走接口或页面切店，异常巡店默认走 agentseller API 的 `mallid` 分店请求
-- 切换到欧区
-- 进入数据报表
-- 打开商品数据报表
-- 按 `TEMU_REPORT_DATE` 强制点击 `今日` 或 `昨日`，并验证对应筛选处于选中状态
-- 按净申报价销售额（全店）降序排序；若店铺没有净销售额列，则回退到申报价销售额（全店）
-- 验证排序表头的下三角为蓝色，同时验证表格数据为从高到低
+- 产品报表通过 Ads API `mall_list` 精确匹配店名，并用 Ads API `mall_switch` 切换当前 session 店铺
+- 按 `TEMU_REPORT_DATE` 计算上海时区 start/end 时间戳
+- 调用 `queryReports` 和 `ads_report` 拉取商品数据，失败时记录到 JSON `failures`
+- 异常巡店默认走 agentseller API 的 `mallid` 分店请求
 - `npm run temu:report:all` 只生成所有账号的合并 JSON
 - `npm run temu:report:all:image` 生成紧凑汇总图片，并通过企业微信群机器人 webhook 发送销售汇总 markdown、图片、出库异常和店铺运营状态表格
 
@@ -232,8 +229,7 @@ TEMU_ACCOUNT_ID=whitine-leeev npm run temu:abnormal
 - `TEMU_CAPTURE_NETWORK=1`: 开启页面接口旁路捕获，写入 `temu-network-capture-*.json`
 - `TEMU_CAPTURE_NETWORK_MAX_EVENTS`: 接口捕获最多保存的事件数，默认 `800`
 - `TEMU_CAPTURE_NETWORK_MAX_BODY_CHARS`: 单个响应体预览最多保存字符数，默认 `120000`
-- `TEMU_PRODUCT_SOURCE=dom|api`: 产品广告数据采集来源；直接运行 `scripts/temu-report.mjs` 默认 `dom`，Codex/legacy wrapper 默认 `api`
-- `TEMU_API_DOM_FALLBACK=0`: `TEMU_PRODUCT_SOURCE=api` 时关闭 DOM 兜底，接口失败会直接报错
+- `TEMU_PRODUCT_SOURCE=api`: 产品广告数据采集来源；DOM 页面采集已停用
 - `TEMU_ABNORMAL_SOURCE=api|dom`: 出库单异常采集来源，默认 `api`；设置为 `dom` 时回退旧页面切店和页面读取
 - `TEMU_ABNORMAL_API_DOM_FALLBACK=0`: `TEMU_ABNORMAL_SOURCE=api` 时关闭 DOM 兜底，接口失败会直接报错
 - `TEMU_ABNORMAL_API_PAGE_SIZE`: 出库单异常 API 明细每页条数，默认 `10`，与页面请求保持一致
@@ -270,14 +266,14 @@ npm run temu:report
 
 `npm run temu:login` 是 Playwright persistent profile 方案。Temu 如果拦截自动化浏览器登录，优先使用 `npm run temu:login:cdp`。
 
-店铺名使用精确匹配，不做模糊匹配。例如 `Whitine Products` 和 `Whitine Products Global` 会被视为两个不同店铺。区域切换控件缺失会直接报错，因为正确店铺应当显示该控件。
+店铺名使用精确匹配，不做模糊匹配。例如 `Whitine Products` 和 `Whitine Products Global` 会被视为两个不同店铺。
 
 当前 Codex 定时策略：
 
-- `00:01`：自动点击 `昨日`，汇总并推送昨日数据，标题使用 `昨日汇总`
-- `09:00`：自动点击 `今日`，汇总并推送今日数据
+- `00:01`：通过 API 时间戳汇总并推送昨日数据，标题使用 `昨日汇总`
+- `09:00`：通过 API 时间戳汇总并推送今日数据
 
-Codex 自动化会调用 `npm run temu:report:codex:yesterday` 和 `npm run temu:report:codex:today`。入口 `/Users/vure/ReportDalily/scripts/run-codex-temu-report.sh` 会先用 `caffeinate -u` 声明用户活跃并等待桌面恢复，再用 `caffeinate -d -i -m` 包住整次采集。产品广告数据默认走 `TEMU_PRODUCT_SOURCE=api`，从页面登录态调用 Temu 接口切店和拉取报表；出库单异常默认走 `TEMU_ABNORMAL_SOURCE=api`，从 agentseller 登录态按 `mallid` 拉取异常数量和明细；店铺运营状态默认走 agentseller `product/skc/pageQuery`。需要调试旧路径时，可临时设置 `TEMU_PRODUCT_SOURCE=dom` 或 `TEMU_ABNORMAL_SOURCE=dom`。
+Codex 自动化会调用 `npm run temu:report:codex:yesterday` 和 `npm run temu:report:codex:today`。入口 `/Users/vure/ReportDalily/scripts/run-codex-temu-report.sh` 会先用 `caffeinate -u` 声明用户活跃并等待桌面恢复，再用 `caffeinate -d -i -m` 包住整次采集。产品广告数据默认走 `TEMU_PRODUCT_SOURCE=api`，从页面登录态调用 Temu 接口切店和拉取报表；出库单异常默认走 `TEMU_ABNORMAL_SOURCE=api`，从 agentseller 登录态按 `mallid` 拉取异常数量和明细；店铺运营状态默认走 agentseller `product/skc/pageQuery`。需要调试出库单异常旧路径时，可临时设置 `TEMU_ABNORMAL_SOURCE=dom`。
 
 `09:00` 的 `today` 流程中，广告数据跑完后会用 `npm run temu:agentseller-checks` 按顺序跑出库单异常和店铺运营状态；调价待办拒绝暂停每日自动执行。两个检查完成后再发送销售汇总图片，以及包含出库异常和店铺运营状态的 `markdown_v2` 表格。
 

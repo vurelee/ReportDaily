@@ -15,7 +15,13 @@ function mallListCandidates(payload) {
     payload?.body?.result,
   ];
   return roots
-    .flatMap((root) => [root?.mallList, root?.mall_list])
+    .flatMap((root) => [
+      root?.mallList,
+      root?.mall_list,
+      root?.query_mall_detail_resp_dtolist,
+      ...(Array.isArray(root?.companyList) ? root.companyList.map((company) => company?.malInfoList) : []),
+      ...(Array.isArray(root?.company_list) ? root.company_list.map((company) => company?.mall_info_list) : []),
+    ])
     .filter((value) => Array.isArray(value));
 }
 

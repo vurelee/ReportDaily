@@ -25,16 +25,12 @@ if [[ -z "${TEMU_PRODUCT_SOURCE:-}" ]]; then
 fi
 
 case "$TEMU_PRODUCT_SOURCE" in
-  dom|api) ;;
+  api) ;;
   *)
-    echo "TEMU_PRODUCT_SOURCE must be dom or api; got: $TEMU_PRODUCT_SOURCE" >&2
+    echo "TEMU_PRODUCT_SOURCE must be api; got: $TEMU_PRODUCT_SOURCE" >&2
     exit 2
     ;;
 esac
-
-if [[ -z "${TEMU_API_DOM_FALLBACK:-}" ]]; then
-  export TEMU_API_DOM_FALLBACK="1"
-fi
 
 audit_log="/Users/vure/ReportDalily/temu-reports/launchd.audit.log"
 lock_dir="/tmp/com.vure.temu-report.lock"
@@ -80,7 +76,7 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-log_audit "start: pid=$$ ppid=$PPID report_date=$TEMU_REPORT_DATE product_source=$TEMU_PRODUCT_SOURCE api_dom_fallback=$TEMU_API_DOM_FALLBACK pwd=$PWD path=$PATH"
+log_audit "start: pid=$$ ppid=$PPID report_date=$TEMU_REPORT_DATE product_source=$TEMU_PRODUCT_SOURCE pwd=$PWD path=$PATH"
 
 wake_delay="${TEMU_LAUNCHD_WAKE_DELAY_SECONDS:-25}"
 if ! [[ "$wake_delay" =~ '^[0-9]+$' ]]; then

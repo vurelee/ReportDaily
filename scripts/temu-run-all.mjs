@@ -9,8 +9,7 @@ const reportDir = process.env.TEMU_REPORT_DIR || path.join(rootDir, "temu-report
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const combinedJsonPath = path.join(reportDir, `temu-all-accounts-${stamp}.json`);
 const reportDate = normalizeReportDate(process.env.TEMU_REPORT_DATE);
-const productSource = String(process.env.TEMU_PRODUCT_SOURCE || "dom").trim().toLowerCase();
-const apiDomFallback = process.env.TEMU_API_DOM_FALLBACK !== "0";
+const productSource = normalizeProductSource(process.env.TEMU_PRODUCT_SOURCE);
 const reportDateLabels = {
   today: "今日",
   yesterday: "昨日",
@@ -23,6 +22,12 @@ function normalizeReportDate(value) {
   const normalized = String(value || "today").trim().toLowerCase();
   if (["today", "yesterday"].includes(normalized)) return normalized;
   throw new Error("TEMU_REPORT_DATE must be today or yesterday");
+}
+
+function normalizeProductSource(value) {
+  const normalized = String(value || "api").trim().toLowerCase();
+  if (normalized === "api") return normalized;
+  throw new Error("TEMU_PRODUCT_SOURCE must be api");
 }
 
 function briefProductName(value, maxLength = 26) {
@@ -63,6 +68,7 @@ function runAccountOnce(account) {
       TEMU_KNOWN_SHOPS: account.knownShops.join(","),
       TEMU_REGION: account.region || process.env.TEMU_REGION || "欧区",
       TEMU_REPORT_DATE: reportDate,
+      TEMU_PRODUCT_SOURCE: productSource,
       TEMU_REPORT_PREFIX: `temu-${account.id}`,
     };
 
@@ -222,7 +228,7 @@ await fs.writeFile(
       reportDate,
       reportDateLabel,
       productSource,
-      apiDomFallback,
+      apiDomFallback: false,
       message,
       results: results.map((result) =>
         result.report

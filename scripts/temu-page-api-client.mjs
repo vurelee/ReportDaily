@@ -8,13 +8,15 @@ function endpointUrl(origin, endpoint) {
   return new URL(String(endpoint || ""), origin).toString();
 }
 
-export async function temuPageApiPost(page, {
+export async function temuPageRequest(page, {
   origin,
   endpoint,
   body = undefined,
   mallId = "",
   label = "Temu page API",
   headers = {},
+  method = "POST",
+  timeoutMs = 0,
 } = {}) {
   if (!page || page.isClosed()) {
     throw new Error(`${label}: page is closed before requesting ${endpoint || "unknown endpoint"}`);
@@ -28,15 +30,17 @@ export async function temuPageApiPost(page, {
 
   try {
     return await page.evaluate(
-      async ({ url, endpoint, body, hasBody, mallId, label, extraHeaders }) => {
+      async ({ url, endpoint, body, hasBody, mallId, label, extraHeaders, method, timeoutMs }) => {
         async function antiContentValue() {
           try {
             if (!window.__codexTemuChunkRequire) {
               const factories = {};
-              for (const chunk of self["webpackJsonp_bg-agent-seller-lgst"] || []) {
-                const modules = chunk?.[1];
-                if (!modules || typeof modules !== "object") continue;
-                Object.assign(factories, modules);
+              for (const chunkName of ["webpackJsonp_bg-agent-seller-lgst", "webpackJsonp_mms_seller_bg_pc_mms", "webpackJsonp"]) {
+                for (const chunk of self[chunkName] || []) {
+                  const modules = chunk?.[1];
+                  if (!modules || typeof modules !== "object") continue;
+                  Object.assign(factories, modules);
+                }
               }
               const cache = {};
               const chunkRequire = (id) => {
@@ -86,12 +90,20 @@ export async function temuPageApiPost(page, {
         if (antiContent) requestHeaders["Anti-Content"] = antiContent;
         if (mallId) requestHeaders.mallid = String(mallId);
 
-        const response = await fetch(url, {
-          method: "POST",
-          credentials: "include",
-          headers: requestHeaders,
-          ...(hasBody ? { body: JSON.stringify(body || {}) } : {}),
-        });
+        const controller = timeoutMs > 0 ? new AbortController() : null;
+        const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+        let response;
+        try {
+          response = await fetch(url, {
+            method,
+            credentials: "include",
+            headers: requestHeaders,
+            signal: controller?.signal,
+            ...(hasBody ? { body: JSON.stringify(body || {}) } : {}),
+          });
+        } finally {
+          if (timeoutId) clearTimeout(timeoutId);
+        }
         const bodyText = await response.text();
         let json = null;
         try {
@@ -118,6 +130,8 @@ export async function temuPageApiPost(page, {
         hasBody,
         mallId,
         label,
+        method,
+        timeoutMs,
         extraHeaders: { ...DEFAULT_HEADERS, ...headers },
       },
     );
@@ -125,4 +139,8 @@ export async function temuPageApiPost(page, {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`${label}: ${endpoint} request failed: ${message}`);
   }
+}
+
+export async function temuPageApiPost(page, options = {}) {
+  return await temuPageRequest(page, { ...options, method: "POST" });
 }

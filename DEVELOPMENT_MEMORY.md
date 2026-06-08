@@ -4,6 +4,73 @@ This file records project implementation decisions and development conventions.
 It is not an API reference. Keep Temu endpoint details in `temu_API.md`; keep
 operator-facing usage in `README.md`.
 
+## Agent Architecture Map
+
+Use this map before adding or changing scanner scripts. The main rule is:
+reuse the login, page API, and mall resolver helpers; keep each business
+scanner focused on its own endpoints, validation, and output shape.
+
+```mermaid
+flowchart TB
+  Command["Manual command / Codex automation"]
+  Config["temu-accounts.json<br/>account id, CDP port, Chrome profile, target shops"]
+  CDP["Chrome over CDP<br/>saved password, cookies, login state"]
+
+  Login["temu-login-helper.mjs<br/>Seller Center / AgentSeller login and auth"]
+  Consent["temu-consent-helper.mjs<br/>agreement checkbox"]
+  Popup["temu-popup-cleaner.mjs<br/>blocking popup cleanup"]
+
+  PageApi["temu-page-api-client.mjs<br/>page-context POST<br/>cookies + Anti-Content + optional mallid"]
+  MallResolver["temu-mall-resolver.mjs<br/>exact shop name -> mallId"]
+
+  Command --> Config
+  Config --> CDP
+  CDP --> Login
+  Login --> Consent
+  Login --> Popup
+  Login --> PageApi
+  PageApi --> MallResolver
+
+  subgraph BusinessScanners["Business scanners keep business logic only"]
+    Product["temu-report.mjs<br/>Ads product report<br/>Ads mall_list + mall_switch"]
+    Funds["temu-shop-funds.mjs<br/>Seller Center / AgentSeller funds"]
+    Abnormal["temu-abnormal-orders.mjs<br/>AgentSeller abnormal orders"]
+    Operation["temu-operation-status.mjs<br/>AgentSeller operation status"]
+    Price["temu-price-adjust-reject.mjs<br/>AgentSeller price-adjust reject"]
+    Future["future scanner, for example temu-orders.mjs<br/>new order API collection"]
+  end
+
+  MallResolver --> Product
+  MallResolver --> Funds
+  MallResolver --> Abnormal
+  MallResolver --> Operation
+  MallResolver --> Price
+  MallResolver --> Future
+
+  Product --> Reports["temu-reports/*.json"]
+  Funds --> Reports
+  Abnormal --> Reports
+  Operation --> Reports
+  Price --> Reports
+  Future --> Reports
+
+  Reports --> Summary["summary / markdown / image scripts"]
+  Summary --> WeCom["wecom-send.mjs<br/>Enterprise WeChat webhook"]
+```
+
+When adding a new feature such as order data:
+
+- create a new consumer script such as `scripts/temu-orders.mjs`;
+- start from the correct logged-in backend page, usually AgentSeller or Seller
+  Center, then let `loginSellerIfNeeded()` settle auth;
+- use `temuPageApiPost()` for browser-authenticated API calls;
+- resolve target shops through `resolveMallByExactName()` and exact
+  `temu-accounts.json` shop names;
+- first test whether the endpoint honors `mallid`; only use a backend switch API
+  when direct `mallid` scoping is ignored;
+- write stable JSON under `temu-reports/` first, then add image or WeCom delivery
+  only after the data script is reliable.
+
 ## 2026-06-07 Seller Center Login Refactor
 
 Seller Center and AgentSeller login handling is centralized in
@@ -167,13 +234,15 @@ New shared helpers:
   API calls that need the current page context, cookies, optional `mallid`, and
   AgentSeller `Anti-Content`.
 - `scripts/temu-mall-resolver.mjs`: exact-only mall resolver for
-  `userInfo -> mallList -> mallName -> mallId`.
+  Seller Center, AgentSeller, and Ads mall-list shapes.
 
 Current consumers:
 
 - `scripts/temu-operation-status.mjs`
 - `scripts/temu-abnormal-orders.mjs`
 - `scripts/temu-price-adjust-reject.mjs`
+- `scripts/temu-shop-funds.mjs`
+- `scripts/temu-report.mjs`
 
 These scripts now demonstrate the intended split:
 
@@ -183,11 +252,102 @@ These scripts now demonstrate the intended split:
 - each consumer keeps only its own business-specific collection, validation,
   JSON formatting, and message summarization.
 
-Other scripts are not migrated yet:
+For `scripts/temu-report.mjs`, login and authorization can still use DOM because
+Temu login depends on Chrome profile state, saved passwords, consent checkboxes,
+and Seller Center authorization. After login, product daily data must stay API
+only: use Ads `mall_list` plus `mall_switch` for shop selection, then
+`queryReports` plus `ads_report` for data. Do not restore page UI shop switching,
+region/date clicking, table parsing, sort clicking, or API-failure DOM fallback.
 
-- `scripts/temu-shop-funds.mjs`
-- `scripts/temu-report.mjs`
+Ads `ads_report` is bound to the current Ads session shop: tested `mallid`
+headers, request-body mall fields, and URL query mall fields are ignored by that
+endpoint. Keep Ads API `mall_switch`; do not try to split shops by passing
+`mallid` directly to `ads_report`.
 
-Future scanner work should migrate those scripts incrementally, one consumer at
-a time, preserving existing JSON shape, error codes, and delivery behavior. Keep
-exact shop-name matching; do not introduce fuzzy mall matching.
+Future scanner work should migrate scripts incrementally, one consumer at a time,
+preserving existing JSON shape, error codes, and delivery behavior. Keep exact
+shop-name matching; do not introduce fuzzy mall matching.
+
+## 2026-06-08 Order Sales Income Scanner
+
+`scripts/temu-order-sales-income.mjs` is the dedicated order sales income
+collector. Keep it separate from product daily reports, abnormal orders,
+operation status, and shop funds.
+
+Business scope:
+
+- Only collect configured semi-managed shops from `temu-accounts.json`, unless
+  `TEMU_ORDER_SALES_SHOPS` explicitly narrows the shop list.
+- Default regions are EU and US:
+  - EU: `https://agentseller-eu.temu.com/mmsos/orders.html`
+  - US: `https://agentseller-us.temu.com/mmsos/orders.html`
+- Each account and each region must enter its own AgentSeller order page and
+  settle login/authentication before collection.
+- Use the existing account CDP profile, login helper, consent helper, page API
+  client, cleanup helper, and exact mall resolver. Do not create a separate
+  order-income login flow or a separate Chrome profile.
+
+Collection model:
+
+- Use page-context API calls for order list requests so cookies, login state,
+  `Anti-Content`, and `mallid` are supplied by the live browser page.
+- Resolve shops with `resolveMallByExactName()` only. Do not fuzzy-match shop
+  names and do not default to all shops.
+- The order list page size is `500`.
+- By default omit `fulfillmentMode` in the order-list API request so all
+  fulfillment forms are included for the semi-managed shop. If a narrow test
+  needs a specific mode, set `TEMU_ORDER_SALES_FULFILLMENT_MODE=0` or `1`.
+- Do not send request-body `fulfillmentMode=9`; earlier validation showed
+  URL/UI "全部订单" can work while request-body `9` can return inconsistent rows.
+- DOM shop switching is required by default for this scanner. The detail HTML
+  and visible current shop can diverge when relying only on `mallid`, so keep
+  `TEMU_ORDER_SALES_DOM_SWITCH` enabled unless debugging a known-safe path.
+- Detail sales income is parsed from the `order-detail.html` document HTML.
+  Verified by clicking a real list-row `订单详情` link: the HTML document itself
+  contained `销售收益`, `销售回款`, `订单货款`, `运费回款`, and `实际收入`.
+- A cold direct fetch of `order-detail.html` can return only the shell/i18n
+  page. Treat the correct list/page/session context as part of the contract.
+
+Cancelled orders:
+
+- Detect cancellation from the order-list API before requesting detail HTML.
+  Signals include `parentOrderMap.parentOrderStatus === 3`,
+  all `orderList[].orderStatus === 3`, or cancel quantity without shipped or
+  fulfillment quantity.
+- Cancelled orders must be saved as normal output rows with
+  `orderStatus: "已取消"`, every income amount set to `0`, and
+  `source.type: "orderList"`.
+- Keep separate stats for cancellation candidates and actual zero rows:
+  `cancelledCandidateCount` records how many cancelled candidates appeared in
+  scanned list pages; `skipped.cancelledAsZero` records how many were written
+  into the result set as zero-income orders.
+
+Performance and limits:
+
+- `TEMU_ORDER_SALES_DETAIL_CONCURRENCY` is hard-capped at `4`, even if a higher
+  value is supplied. Validation showed higher concurrency can stall the browser
+  and produce many timeouts.
+- `TEMU_ORDER_SALES_LIMIT` means per account per region when
+  `TEMU_ORDER_SALES_LIMIT_PER_SHOP` is not set.
+- If a region or shop has fewer eligible orders than the limit, use the actual
+  eligible count as `expectedOrders` so "不足就取全部" succeeds.
+
+Useful commands:
+
+```bash
+npm run temu:order-sales-income
+TEMU_ACCOUNT_ID=setonr TEMU_ORDER_SALES_REGIONS=eu TEMU_ORDER_SALES_SHOPS='SETONR Products' TEMU_ORDER_SALES_DATE=2026-05-01 TEMU_ORDER_SALES_LIMIT=5 npm run temu:order-sales-income
+node --check scripts/chrome-cdp.mjs
+node --check scripts/temu-page-api-client.mjs
+node --check scripts/temu-order-sales-income.mjs
+```
+
+Verification samples from implementation:
+
+- EU `SETONR Products`, `2026-05-01`, requested concurrency `8`, output
+  `detailConcurrency=4`.
+- EU `SETONR Products`, `2026-05-01`, 22-order sample wrote cancelled orders
+  such as `PO-069-07665616661112020` and `PO-076-07999576149114063` with all
+  income fields set to `0`.
+- US `SETONR Products`, `2026-05-01`, limit `100`, total list count `9`,
+  output saved `9/9` with `targetMet=true`.

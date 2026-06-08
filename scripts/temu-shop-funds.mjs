@@ -12,6 +12,8 @@ import {
   needsVerification,
   waitForMatchingPage,
 } from "./temu-login-helper.mjs";
+import { temuPageApiPost } from "./temu-page-api-client.mjs";
+import { extractMallList, resolveMallByExactName } from "./temu-mall-resolver.mjs";
 import { closeTemuPopups } from "./temu-popup-cleaner.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -379,45 +381,23 @@ async function ensureAgentSettlePage(context, page, region) {
 }
 
 async function sellerApiPost(page, endpoint, body = {}, { mallId } = {}, label = "Seller Center API") {
-  const url = endpoint.startsWith("http") ? endpoint : `${SELLER_ORIGIN}${endpoint}`;
-  const response = await page.evaluate(
-    async ({ url, body, mallId }) => {
-      const headers = {
-        accept: "*/*",
-        "content-type": "application/json",
-      };
-      if (mallId) headers.mallid = String(mallId);
-
-      const response = await fetch(url, {
-        method: "POST",
-        credentials: "include",
-        headers,
-        body: JSON.stringify(body || {}),
-      });
-      const text = await response.text();
-      let parsed = null;
-      try {
-        parsed = text ? JSON.parse(text) : null;
-      } catch {
-        parsed = null;
-      }
-      return {
-        ok: response.ok,
-        status: response.status,
-        url: response.url,
-        body: parsed,
-        text: parsed ? "" : text.slice(0, 1000),
-      };
+  const response = await temuPageApiPost(page, {
+    origin: SELLER_ORIGIN,
+    endpoint,
+    body,
+    mallId,
+    label,
+    headers: {
+      accept: "*/*",
     },
-    { url, body, mallId },
-  );
+  });
 
-  if (!response.ok) {
-    fail("SELLER_API_HTTP_FAILED", `${label} HTTP ${response.status || "unknown"}：${response.text || ""}`);
+  if (!response?.ok) {
+    fail("SELLER_API_HTTP_FAILED", `${label} HTTP ${response?.status || "unknown"}：${(response?.bodyText || "").slice(0, 1000)}`);
   }
-  const responseBody = response.body;
+  const responseBody = response.json;
   if (!responseBody || typeof responseBody !== "object") {
-    fail("SELLER_API_RESPONSE_NOT_JSON", `${label} 返回非 JSON：${response.text || ""}`);
+    fail("SELLER_API_RESPONSE_NOT_JSON", `${label} 返回非 JSON：${(response.bodyText || "").slice(0, 1000)}`);
   }
   const errorCode = responseBody.errorCode ?? responseBody.error_code;
   if (responseBody.success === false || (errorCode !== undefined && Number(errorCode) !== 1000000)) {
@@ -428,98 +408,20 @@ async function sellerApiPost(page, endpoint, body = {}, { mallId } = {}, label =
 }
 
 async function agentSellerApiPost(page, region, endpoint, body = {}, { mallId } = {}, label = "AgentSeller API") {
-  const url = endpoint.startsWith("http") ? endpoint : `${region.origin}${endpoint}`;
-  const response = await page.evaluate(
-    async ({ url, body, mallId }) => {
-      async function antiContentValue() {
-        try {
-          if (!window.__codexTemuChunkRequire) {
-            const factories = {};
-            for (const chunkName of ["webpackJsonp_bg-agent-seller-lgst", "webpackJsonp_mms_seller_bg_pc_mms", "webpackJsonp"]) {
-              for (const chunk of self[chunkName] || []) {
-                const modules = chunk?.[1];
-                if (modules && typeof modules === "object") Object.assign(factories, modules);
-              }
-            }
-            const cache = {};
-            const chunkRequire = (id) => {
-              const key = String(id);
-              if (cache[key]) return cache[key].exports;
-              const factory = factories[key];
-              if (!factory) throw new Error(`module ${key} not found`);
-              const module = { exports: {} };
-              cache[key] = module;
-              factory.call(module.exports, module, module.exports, chunkRequire);
-              return module.exports;
-            };
-            chunkRequire.d = (exports, definition) => {
-              for (const key of Object.keys(definition)) {
-                if (!Object.prototype.hasOwnProperty.call(exports, key)) {
-                  Object.defineProperty(exports, key, { enumerable: true, get: definition[key] });
-                }
-              }
-            };
-            chunkRequire.o = (object, property) => Object.prototype.hasOwnProperty.call(object, property);
-            chunkRequire.r = (exports) => {
-              if (typeof Symbol !== "undefined" && Symbol.toStringTag) {
-                Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
-              }
-              Object.defineProperty(exports, "__esModule", { value: true });
-            };
-            chunkRequire.n = (module) => {
-              const getter = module && module.__esModule ? () => module.default : () => module;
-              chunkRequire.d(getter, { a: getter });
-              return getter;
-            };
-            window.__codexTemuChunkRequire = chunkRequire;
-          }
-          const riskUtil = window.__codexTemuChunkRequire?.(65531);
-          if (typeof riskUtil?.cN === "function") return await riskUtil.cN();
-          if (typeof riskUtil?.xy === "function") return riskUtil.xy();
-        } catch {
-          return "";
-        }
-        return "";
-      }
+  const response = await temuPageApiPost(page, {
+    origin: region.origin,
+    endpoint,
+    body,
+    mallId,
+    label,
+  });
 
-      const headers = {
-        accept: "application/json, text/plain, */*",
-        "content-type": "application/json",
-      };
-      const antiContent = await antiContentValue();
-      if (antiContent) headers["Anti-Content"] = antiContent;
-      if (mallId) headers.mallid = String(mallId);
-
-      const response = await fetch(url, {
-        method: "POST",
-        credentials: "include",
-        headers,
-        body: JSON.stringify(body || {}),
-      });
-      const text = await response.text();
-      let parsed = null;
-      try {
-        parsed = text ? JSON.parse(text) : null;
-      } catch {
-        parsed = null;
-      }
-      return {
-        ok: response.ok,
-        status: response.status,
-        url: response.url,
-        body: parsed,
-        text: parsed ? "" : text.slice(0, 1000),
-      };
-    },
-    { url, body, mallId },
-  );
-
-  if (!response.ok) {
-    fail("AGENT_API_HTTP_FAILED", `${label} HTTP ${response.status || "unknown"}：${response.text || ""}`);
+  if (!response?.ok) {
+    fail("AGENT_API_HTTP_FAILED", `${label} HTTP ${response?.status || "unknown"}：${(response?.bodyText || "").slice(0, 1000)}`);
   }
-  const responseBody = response.body;
+  const responseBody = response.json;
   if (!responseBody || typeof responseBody !== "object") {
-    fail("AGENT_API_RESPONSE_NOT_JSON", `${label} 返回非 JSON：${response.text || ""}`);
+    fail("AGENT_API_RESPONSE_NOT_JSON", `${label} 返回非 JSON：${(response.bodyText || "").slice(0, 1000)}`);
   }
   const errorCode = responseBody.errorCode ?? responseBody.error_code;
   if (responseBody.success === false || (errorCode !== undefined && Number(errorCode) !== 1000000)) {
@@ -531,7 +433,7 @@ async function agentSellerApiPost(page, region, endpoint, body = {}, { mallId } 
 
 async function sellerMallList(page) {
   const result = await sellerApiPost(page, USER_INFO_ENDPOINT, {}, {}, "卖家中心店铺列表接口");
-  const malls = (result.companyList || []).flatMap((company) => company.malInfoList || []);
+  const malls = extractMallList(result);
   if (!Array.isArray(malls) || malls.length === 0) {
     fail("SELLER_MALL_LIST_EMPTY", "卖家中心店铺列表接口没有返回可切换店铺");
   }
@@ -540,7 +442,7 @@ async function sellerMallList(page) {
 
 async function agentMallList(page, region) {
   const result = await agentSellerApiPost(page, region, AGENT_USER_INFO_ENDPOINT, {}, {}, `${region.label} 店铺列表接口`);
-  const malls = result.mallList || [];
+  const malls = extractMallList(result);
   if (!Array.isArray(malls) || malls.length === 0) {
     fail("AGENT_MALL_LIST_EMPTY", `${region.label} 店铺列表接口没有返回可切换店铺`);
   }
@@ -548,14 +450,25 @@ async function agentMallList(page, region) {
 }
 
 function mallInfoForShop(malls, shopName) {
-  const matches = (malls || []).filter((mall) => cleanText(mall.mallName) === shopName);
-  if (matches.length !== 1) {
+  let resolved;
+  try {
+    resolved = resolveMallByExactName(malls, shopName);
+  } catch (error) {
+    const message = errorMessage(error);
+    if (message.includes("缺少 mallId")) {
+      fail("SELLER_SHOP_MALL_ID_MISSING", `卖家中心店铺列表中 ${shopName} 缺少 mallId`);
+    }
+    const matches = extractMallList(malls).filter((mall) => cleanText(mall.mallName ?? mall.mall_name) === shopName);
     fail("SELLER_SHOP_TARGET_NOT_FOUND", `卖家中心店铺列表中找不到唯一精确店名：${shopName}；匹配数=${matches.length}`);
   }
-  const mall = matches[0];
-  const mallId = String(mall.mallId || "");
-  if (!mallId) fail("SELLER_SHOP_MALL_ID_MISSING", `卖家中心店铺列表中 ${shopName} 缺少 mallId`);
-  return { mallId, mallName: cleanText(mall.mallName), mallMode: mall.mallMode, isSemiManagedMall: mall.isSemiManagedMall };
+
+  const mall = resolved.raw;
+  return {
+    mallId: resolved.mallId,
+    mallName: resolved.mallName,
+    mallMode: mall.mallMode,
+    isSemiManagedMall: mall.isSemiManagedMall,
+  };
 }
 
 async function waitForSellerPage(context, timeoutMs = 8000) {

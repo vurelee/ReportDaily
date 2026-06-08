@@ -3,24 +3,36 @@ import { existsSync } from "node:fs";
 import { chromium } from "playwright";
 import { config } from "./temu-config.mjs";
 
-export const cdpEndpoint = `http://127.0.0.1:${config.cdpPort}`;
+function cdpConfig(options = {}) {
+  return {
+    cdpPort: Number(options.cdpPort || config.cdpPort),
+    cdpProfileDir: options.cdpProfileDir || config.cdpProfileDir,
+    temuHomeUrl: options.temuHomeUrl || config.temuHomeUrl,
+  };
+}
 
-async function isCdpReady() {
+export function cdpEndpointFor(options = {}) {
+  return `http://127.0.0.1:${cdpConfig(options).cdpPort}`;
+}
+
+export const cdpEndpoint = cdpEndpointFor();
+
+async function isCdpReady(options = {}) {
   try {
-    const response = await fetch(`${cdpEndpoint}/json/version`);
+    const response = await fetch(`${cdpEndpointFor(options)}/json/version`);
     return response.ok;
   } catch {
     return false;
   }
 }
 
-async function waitForCdp(timeoutMs = 15000) {
+async function waitForCdp(options = {}, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (await isCdpReady()) return;
+    if (await isCdpReady(options)) return;
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
-  throw new Error(`Chrome CDP endpoint not ready: ${cdpEndpoint}`);
+  throw new Error(`Chrome CDP endpoint not ready: ${cdpEndpointFor(options)}`);
 }
 
 function execFileText(command, args) {
@@ -39,9 +51,10 @@ function execFileText(command, args) {
   });
 }
 
-async function resetCdpChrome() {
+async function resetCdpChrome(options = {}) {
+  const cdp = cdpConfig(options);
   const stdout = await execFileText("lsof", [
-    "-tiTCP:" + String(config.cdpPort),
+    "-tiTCP:" + String(cdp.cdpPort),
     "-sTCP:LISTEN",
   ]);
   const pids = stdout
@@ -62,10 +75,11 @@ async function resetCdpChrome() {
   }
 }
 
-function chromeArgs(url) {
+function chromeArgs(url, options = {}) {
+  const cdp = cdpConfig(options);
   return [
-    `--remote-debugging-port=${config.cdpPort}`,
-    `--user-data-dir=${config.cdpProfileDir}`,
+    `--remote-debugging-port=${cdp.cdpPort}`,
+    `--user-data-dir=${cdp.cdpProfileDir}`,
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-background-timer-throttling",
@@ -77,53 +91,53 @@ function chromeArgs(url) {
   ];
 }
 
-function launchWithOpen(url) {
+function launchWithOpen(url, options = {}) {
   spawn(
     "open",
     [
       "-na",
       "Google Chrome",
       "--args",
-      ...chromeArgs(url),
+      ...chromeArgs(url, options),
     ],
     { detached: true, stdio: "ignore" },
   ).unref();
 }
 
-function launchWithChromeBinary(url) {
+function launchWithChromeBinary(url, options = {}) {
   const chromeExecutable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
   if (!existsSync(chromeExecutable)) return false;
 
-  spawn(chromeExecutable, chromeArgs(url), { detached: true, stdio: "ignore" }).unref();
+  spawn(chromeExecutable, chromeArgs(url, options), { detached: true, stdio: "ignore" }).unref();
   return true;
 }
 
-export async function ensureCdpChrome(url = config.temuHomeUrl) {
-  if (await isCdpReady()) return;
+export async function ensureCdpChrome(url = config.temuHomeUrl, options = {}) {
+  if (await isCdpReady(options)) return;
 
-  launchWithOpen(url);
+  launchWithOpen(url, options);
 
   try {
-    await waitForCdp();
+    await waitForCdp(options);
   } catch (error) {
-    if (!launchWithChromeBinary(url)) throw error;
-    await waitForCdp(20000);
+    if (!launchWithChromeBinary(url, options)) throw error;
+    await waitForCdp(options, 20000);
   }
 }
 
-export async function connectCdpChrome(url = config.temuHomeUrl) {
-  await ensureCdpChrome(url);
+export async function connectCdpChrome(url = config.temuHomeUrl, options = {}) {
+  await ensureCdpChrome(url, options);
   try {
-    return await openCdpSession();
+    return await openCdpSession(options);
   } catch (error) {
-    await resetCdpChrome();
-    await ensureCdpChrome(url);
-    return await openCdpSession();
+    await resetCdpChrome(options);
+    await ensureCdpChrome(url, options);
+    return await openCdpSession(options);
   }
 }
 
-async function openCdpSession() {
-  const browser = await chromium.connectOverCDP(cdpEndpoint);
+async function openCdpSession(options = {}) {
+  const browser = await chromium.connectOverCDP(cdpEndpointFor(options));
   const context = browser.contexts()[0] || (await browser.newContext());
   const pages = context.pages();
   const page = pages[0] || (await context.newPage());
