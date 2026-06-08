@@ -29,8 +29,10 @@ const ORDER_LIMIT_PER_SHOP = parsePositiveInteger(process.env.TEMU_ORDER_SALES_L
 const ORDER_FULFILLMENT_MODE = parseOptionalInteger(process.env.TEMU_ORDER_SALES_FULFILLMENT_MODE);
 const MAX_LIST_PAGES = parsePositiveInteger(process.env.TEMU_ORDER_SALES_MAX_LIST_PAGES, 20);
 const MAX_DETAIL_ATTEMPTS = parsePositiveInteger(process.env.TEMU_ORDER_SALES_MAX_DETAIL_ATTEMPTS, 80);
-const REQUESTED_DETAIL_CONCURRENCY = parsePositiveInteger(process.env.TEMU_ORDER_SALES_DETAIL_CONCURRENCY, 1);
+const REQUESTED_DETAIL_CONCURRENCY = parsePositiveInteger(process.env.TEMU_ORDER_SALES_DETAIL_CONCURRENCY, 4);
 const DETAIL_HARD_CONCURRENCY_CAP = 4;
+const DETAIL_RETRY_ROUNDS = 2;
+const KEEP_CDP_CHROME_PROCESS = process.env.TEMU_CLOSE_CHROME_PROCESS === "0";
 const DETAIL_CONCURRENCY_CAP = Math.min(
   parsePositiveInteger(process.env.TEMU_ORDER_SALES_DETAIL_CONCURRENCY_CAP, DETAIL_HARD_CONCURRENCY_CAP),
   DETAIL_HARD_CONCURRENCY_CAP,
@@ -214,7 +216,24 @@ async function waitSettled(page) {
   await page.waitForTimeout(700).catch(() => {});
 }
 
-async function ensureOrdersPage(context, page) {
+async function switchShopBeforeOrdersPage(page, shopName, knownShops) {
+  if (!shopName || !Array.isArray(knownShops) || knownShops.length === 0) return false;
+  const current = await currentShopName(page, knownShops);
+  if (current === shopName) return true;
+
+  await openShopSwitcher(page, knownShops);
+  const deadline = Date.now() + 45000;
+  while (Date.now() < deadline) {
+    if (await clickShopSwitchButton(page, shopName)) {
+      await waitSettled(page);
+      return true;
+    }
+    await page.waitForTimeout(1500).catch(() => {});
+  }
+  return false;
+}
+
+async function ensureOrdersPage(context, page, { initialShopName = "", knownShops = [] } = {}) {
   let activePage = page && !page.isClosed() ? page : await context.newPage();
   await activePage.goto(targetUrlFor(), { waitUntil: "domcontentloaded" }).catch(() => {});
   await waitSettled(activePage);
@@ -226,6 +245,11 @@ async function ensureOrdersPage(context, page) {
     await closeTemuPopups(activePage).catch(() => {});
 
     if (isOrdersPage(activePage)) return activePage;
+
+    if (DOM_SWITCH_ENABLED && activePage.url().startsWith(orderOrigin())) {
+      await switchShopBeforeOrdersPage(activePage, initialShopName, knownShops).catch(() => false);
+      if (isOrdersPage(activePage)) return activePage;
+    }
 
     const authenticatedPage = await enterAgentAuthenticationIfShown(context, activePage);
     if (authenticatedPage) {
@@ -242,6 +266,9 @@ async function ensureOrdersPage(context, page) {
 
     const text = await bodyText(activePage).catch(() => "");
     if (activePage.url().startsWith(orderOrigin()) || activePage.url().startsWith("https://seller.kuajingmaihuo.com/") || text.includes("TEMU Agent Center")) {
+      if (DOM_SWITCH_ENABLED && activePage.url().startsWith(orderOrigin())) {
+        await switchShopBeforeOrdersPage(activePage, initialShopName, knownShops).catch(() => false);
+      }
       await activePage.goto(targetUrlFor(), { waitUntil: "domcontentloaded" }).catch(() => {});
       await waitSettled(activePage);
     }
@@ -575,6 +602,7 @@ function orderStatusInfo(item) {
   const shippedQuantity = sumOrderLineNumber(orderLines, "shippedQuantity");
   const fulfillmentQuantity = sumOrderLineNumber(orderLines, "fulfillmentQuantity");
   const unShippedQuantity = sumOrderLineNumber(orderLines, "unShippedQuantity");
+  const hasUnshippedSignal = UNSHIPPED_RE.test(joined) || unShippedQuantity > 0;
   const hasTextShippedSignal = SHIPPED_RE.test(joined) && !UNSHIPPED_RE.test(joined);
   const hasApiShippedSignal = Boolean(
     cleanText(parentOrder.parentShippingTimeStr || parentOrder.parentReceiptTimeStr) ||
@@ -595,6 +623,7 @@ function orderStatusInfo(item) {
     isCancelled,
     hasStatusSignal: statusTexts.length > 0,
     hasShippedSignal: hasTextShippedSignal || hasApiShippedSignal,
+    hasUnshippedSignal,
     hasTextShippedSignal,
     hasApiShippedSignal,
   };
@@ -820,29 +849,83 @@ function hasEnoughIncomeData(record) {
   return numericValues.length >= 3 || Number.isFinite(snapshot.estimatedIncome);
 }
 
+function amountsOffset(first, second) {
+  const left = Number(first);
+  const right = Number(second);
+  return Number.isFinite(left) && Number.isFinite(right) && Math.abs(left + right) < 0.01;
+}
+
+function isRefundAfterDelivery(record) {
+  const snapshot = record?.snapshot || {};
+  const hasDeliveredStatus = /已签收|已送达|已完成|delivered|completed/i.test(record?.orderStatus || "");
+  const salesFullyChargedBack =
+    Number(snapshot.salesRepayment) > 0 &&
+    Number(snapshot.salesChargeback) < 0 &&
+    amountsOffset(snapshot.salesRepayment, snapshot.salesChargeback);
+  const shippingFullyChargedBack =
+    !Number(snapshot.shippingRepayment) ||
+    (Number(snapshot.shippingRepayment) > 0 &&
+      Number(snapshot.shippingChargeback) < 0 &&
+      amountsOffset(snapshot.shippingRepayment, snapshot.shippingChargeback));
+  return hasDeliveredStatus && amountsOffset(snapshot.estimatedIncome, 0) && salesFullyChargedBack && shippingFullyChargedBack;
+}
+
+function annotateRefundAfterDelivery(record) {
+  if (!isRefundAfterDelivery(record)) return record;
+  return {
+    ...record,
+    remark: "签收后退款订单",
+    source: {
+      ...record.source,
+      reason: "refundAfterDelivery",
+      remark: "签收后退款订单",
+    },
+  };
+}
+
 function zeroIncomeSnapshot() {
   return Object.fromEntries(INCOME_FIELDS.map((field) => [field.key, 0]));
 }
 
-function cancelledOrderRecord(candidate) {
+function zeroIncomeOrderRecord(candidate, { orderStatus, reason, remark }) {
   return {
     parentOrderSn: candidate.parentOrderSn,
     siteName: "",
     countryName: "",
-    orderStatus: "已取消",
+    orderStatus,
+    remark,
     snapshot: zeroIncomeSnapshot(),
     details: INCOME_FIELDS.map((field) => ({
       parentOrderSn: candidate.parentOrderSn,
       detailType: field.detailType,
       detailName: field.label,
       amount: 0,
-      rawText: "已取消订单按 0 记录",
+      rawText: remark,
     })),
     source: {
       type: "orderList",
-      reason: "cancelled",
+      reason,
+      remark,
     },
   };
+}
+
+function cancelledOrderRecord(candidate) {
+  return zeroIncomeOrderRecord(candidate, {
+    orderStatus: "已取消",
+    reason: "cancelled",
+    remark: "已取消订单按 0 记录",
+  });
+}
+
+function notShippedOrderRecord(candidate) {
+  const statusText =
+    (candidate.listStatus || []).find((text) => UNSHIPPED_RE.test(text)) || candidate.listStatus?.[0] || "待发货/未发货";
+  return zeroIncomeOrderRecord(candidate, {
+    orderStatus: statusText,
+    reason: "notShipped",
+    remark: "待发货/未发货订单按 0 记录",
+  });
 }
 
 async function fetchOrderDetail(page, mallId, parentOrderSn) {
@@ -887,7 +970,7 @@ async function fetchOrderDetail(page, mallId, parentOrderSn) {
     ...rawSnapshot,
     ...(domRecord?.snapshot || {}),
   };
-  const record = {
+  const record = annotateRefundAfterDelivery({
     parentOrderSn,
     siteName: domRecord?.siteName || "",
     countryName: domRecord?.countryName || "",
@@ -901,7 +984,7 @@ async function fetchOrderDetail(page, mallId, parentOrderSn) {
       rawSnapshotKeys: Object.keys(rawSnapshot),
       htmlTextLength: bodyText.length,
     },
-  };
+  });
 
   return {
     ok: hasEnoughIncomeData(record),
@@ -914,6 +997,7 @@ async function collectDetailCandidates(page, shopName, mallInfo, dateRange, targ
   const seen = new Set();
   const candidates = [];
   let cancelledCandidateCount = 0;
+  let notShippedCandidateCount = 0;
   let totalItemNum = 0;
   let rawOrderCount = 0;
 
@@ -945,8 +1029,14 @@ async function collectDetailCandidates(page, shopName, mallInfo, dateRange, targ
         });
         continue;
       }
-      if (statusInfo.hasStatusSignal && !statusInfo.hasShippedSignal) {
-        skipped.notShipped += 1;
+      if (statusInfo.hasUnshippedSignal || (statusInfo.hasStatusSignal && !statusInfo.hasShippedSignal)) {
+        notShippedCandidateCount += 1;
+        candidates.push({
+          kind: "notShipped",
+          parentOrderSn,
+          listStatus: statusInfo.statusTexts,
+          listStatusInfo: statusInfo,
+        });
         continue;
       }
 
@@ -964,6 +1054,7 @@ async function collectDetailCandidates(page, shopName, mallInfo, dateRange, targ
   return {
     candidates: candidates.slice(0, Math.max(targetCount, MAX_DETAIL_ATTEMPTS)),
     cancelledCandidateCount,
+    notShippedCandidateCount,
     totalItemNum,
     rawOrderCount,
   };
@@ -987,11 +1078,31 @@ async function collectDetailsUntilTarget(candidates, concurrency, targetCount, m
   return results;
 }
 
+function detailFailureEntry(candidate, detail, retryRound = 0) {
+  const previousErrors = Array.isArray(candidate.attemptErrors) ? candidate.attemptErrors : [];
+  const currentError = {
+    retryRound,
+    error: detail.error,
+    url: detail.url,
+  };
+  return {
+    parentOrderSn: candidate.parentOrderSn,
+    error: detail.error,
+    url: detail.url,
+    retryRound,
+    attemptErrors: [...previousErrors, currentError],
+    listStatus: candidate.listStatus,
+    listStatusInfo: candidate.listStatusInfo,
+  };
+}
+
 async function collectShopOrders(page, shopName, mallInfo, dateRange, remainingLimit) {
   const orders = [];
   const failedDetails = [];
+  const retryStats = [];
   const skipped = {
     cancelledAsZero: 0,
+    notShippedAsZero: 0,
     notShipped: 0,
     duplicate: 0,
     noIncome: 0,
@@ -999,6 +1110,8 @@ async function collectShopOrders(page, shopName, mallInfo, dateRange, remainingL
   const startedAt = Date.now();
   const candidateResult = await collectDetailCandidates(page, shopName, mallInfo, dateRange, remainingLimit, skipped);
   let detailAttempts = 0;
+  let retryDetailAttempts = 0;
+  let initialFailedDetailCount = 0;
   await collectDetailsUntilTarget(
     candidateResult.candidates,
     DETAIL_CONCURRENCY,
@@ -1017,6 +1130,19 @@ async function collectShopOrders(page, shopName, mallInfo, dateRange, remainingL
         }
         return { candidate, detail: { ok: true, record, skippedDetail: true } };
       }
+      if (candidate.kind === "notShipped") {
+        const record = notShippedOrderRecord(candidate);
+        if (orders.length < remainingLimit) {
+          skipped.notShippedAsZero += 1;
+          orders.push({
+            ...record,
+            listStatus: candidate.listStatus,
+            listStatusInfo: candidate.listStatusInfo,
+          });
+          console.error(`${shopName}: saved ${orders.length}/${remainingLimit} ${candidate.parentOrderSn} not-shipped=0`);
+        }
+        return { candidate, detail: { ok: true, record, skippedDetail: true } };
+      }
 
       const detail = await fetchOrderDetail(page, mallInfo.mallId, candidate.parentOrderSn);
       detailAttempts += 1;
@@ -1031,14 +1157,8 @@ async function collectShopOrders(page, shopName, mallInfo, dateRange, remainingL
           console.error(`${shopName}: saved ${orders.length}/${remainingLimit} ${candidate.parentOrderSn}`);
         }
       } else {
-        skipped.noIncome += 1;
-        failedDetails.push({
-          parentOrderSn: candidate.parentOrderSn,
-          error: detail.error,
-          url: detail.url,
-          listStatus: candidate.listStatus,
-          listStatusInfo: candidate.listStatusInfo,
-        });
+        initialFailedDetailCount += 1;
+        failedDetails.push(detailFailureEntry(candidate, detail));
       }
 
       if (detailAttempts % DETAIL_PROGRESS_EVERY === 0 || detailAttempts === candidateResult.candidates.length) {
@@ -1051,6 +1171,52 @@ async function collectShopOrders(page, shopName, mallInfo, dateRange, remainingL
     },
   );
 
+  for (let retryRound = 1; retryRound <= DETAIL_RETRY_ROUNDS && failedDetails.length > 0; retryRound += 1) {
+    const retryCandidates = failedDetails.splice(0, failedDetails.length).map((failure) => ({
+      parentOrderSn: failure.parentOrderSn,
+      listStatus: failure.listStatus,
+      listStatusInfo: failure.listStatusInfo,
+      attemptErrors: failure.attemptErrors,
+    }));
+    let savedThisRound = 0;
+
+    console.error(`${shopName}: retry round ${retryRound}/${DETAIL_RETRY_ROUNDS} retrying ${retryCandidates.length} failed details`);
+    await collectDetailsUntilTarget(
+      retryCandidates,
+      DETAIL_CONCURRENCY,
+      retryCandidates.length,
+      async (candidate) => {
+        const detail = await fetchOrderDetail(page, mallInfo.mallId, candidate.parentOrderSn);
+        retryDetailAttempts += 1;
+
+        if (detail.ok) {
+          if (orders.length < remainingLimit && !orders.some((order) => order.parentOrderSn === candidate.parentOrderSn)) {
+            savedThisRound += 1;
+            orders.push({
+              ...detail.record,
+              listStatus: candidate.listStatus,
+              listStatusInfo: candidate.listStatusInfo,
+            });
+            console.error(`${shopName}: retry ${retryRound} saved ${orders.length}/${remainingLimit} ${candidate.parentOrderSn}`);
+          }
+        } else {
+          failedDetails.push(detailFailureEntry(candidate, detail, retryRound));
+        }
+
+        return { candidate, detail };
+      },
+    );
+
+    retryStats.push({
+      retryRound,
+      attempted: retryCandidates.length,
+      saved: savedThisRound,
+      failed: failedDetails.length,
+    });
+    console.error(`${shopName}: retry round ${retryRound}/${DETAIL_RETRY_ROUNDS} saved=${savedThisRound} failed=${failedDetails.length}`);
+  }
+
+  skipped.noIncome = failedDetails.length;
   const elapsedMs = Date.now() - startedAt;
 
   return {
@@ -1064,11 +1230,16 @@ async function collectShopOrders(page, shopName, mallInfo, dateRange, remainingL
       totalItemNum: candidateResult.totalItemNum,
       rawOrderCount: candidateResult.rawOrderCount,
       detailAttempts,
+      retryDetailAttempts,
+      initialFailedDetailCount,
       detailCandidateCount: candidateResult.candidates.length,
       cancelledCandidateCount: candidateResult.cancelledCandidateCount,
+      notShippedCandidateCount: candidateResult.notShippedCandidateCount,
       detailConcurrency: DETAIL_CONCURRENCY,
       requestedDetailConcurrency: REQUESTED_DETAIL_CONCURRENCY,
       detailConcurrencyCap: DETAIL_CONCURRENCY_CAP,
+      detailRetryRounds: DETAIL_RETRY_ROUNDS,
+      retryStats,
       detailTimeoutMs: DETAIL_TIMEOUT_MS,
       elapsedMs,
       ordersPerSecond: elapsedMs > 0 ? orders.length / (elapsedMs / 1000) : 0,
@@ -1090,9 +1261,9 @@ async function runAccountRegion(account, region, dateRange, remainingLimit, { pe
   const { browser, context, page } = await connectCdpChrome(targetUrlFor(region), account);
   const shopResults = [];
   try {
-    let activePage = await ensureOrdersPage(context, page);
-    const mallList = await orderMallList(activePage);
     const knownShops = [...new Set([...(account.knownShops || []), ...shops])];
+    let activePage = await ensureOrdersPage(context, page, { initialShopName: shops[0], knownShops });
+    const mallList = await orderMallList(activePage);
 
     for (const shopName of shops) {
       if (!perShopLimit && shopResults.reduce((sum, shop) => sum + shop.orders.length, 0) >= remainingLimit) break;
@@ -1127,8 +1298,16 @@ async function runAccountRegion(account, region, dateRange, remainingLimit, { pe
     if (process.env.TEMU_CLOSE_CHROME_PAGES !== "0") {
       await closeCdpPages(context).catch(() => {});
     }
-    await browser.close().catch(() => {});
-    await closeCdpChromeProcess(account.cdpPort).catch(() => {});
+    if (KEEP_CDP_CHROME_PROCESS) {
+      try {
+        browser.disconnect();
+      } catch {
+        // Interactive test sessions can keep CDP Chrome warm between repeated runs.
+      }
+    } else {
+      await browser.close().catch(() => {});
+      await closeCdpChromeProcess(account.cdpPort).catch(() => {});
+    }
   }
 }
 

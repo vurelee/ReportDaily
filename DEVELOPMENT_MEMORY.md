@@ -301,13 +301,18 @@ Collection model:
 - DOM shop switching is required by default for this scanner. The detail HTML
   and visible current shop can diverge when relying only on `mallid`, so keep
   `TEMU_ORDER_SALES_DOM_SWITCH` enabled unless debugging a known-safe path.
+- Before entering `/mmsos/orders.html`, preselect the first requested
+  semi-managed shop on the AgentSeller home/authentication page when possible.
+  If the profile currently lands on a full-managed shop, that shop can lack
+  order-page permission and the seller-center authorization page can bind to the
+  wrong shop.
 - Detail sales income is parsed from the `order-detail.html` document HTML.
   Verified by clicking a real list-row `订单详情` link: the HTML document itself
   contained `销售收益`, `销售回款`, `订单货款`, `运费回款`, and `实际收入`.
 - A cold direct fetch of `order-detail.html` can return only the shell/i18n
   page. Treat the correct list/page/session context as part of the contract.
 
-Cancelled orders:
+Zero-income order classification:
 
 - Detect cancellation from the order-list API before requesting detail HTML.
   Signals include `parentOrderMap.parentOrderStatus === 3`,
@@ -315,17 +320,38 @@ Cancelled orders:
   fulfillment quantity.
 - Cancelled orders must be saved as normal output rows with
   `orderStatus: "已取消"`, every income amount set to `0`, and
-  `source.type: "orderList"`.
-- Keep separate stats for cancellation candidates and actual zero rows:
+  `source.type: "orderList"`, `source.reason: "cancelled"`, and
+  `remark: "已取消订单按 0 记录"`.
+- Orders detected from the order-list API as `待发货` / `未发货` / `待履约` /
+  `待处理` must also be saved as zero-income rows before requesting detail HTML.
+  Use `source.reason: "notShipped"` and
+  `remark: "待发货/未发货订单按 0 记录"`. API quantity signals such as
+  `unShippedQuantity > 0` count even when no Chinese status text is present.
+- Delivered orders whose detail page shows `实际收入 = 0` because sales repayment
+  is fully offset by sales chargeback and shipping repayment is fully offset by
+  shipping chargeback are `签收后退款订单`. Keep the platform `orderStatus`
+  such as `已签收`, but add `source.reason: "refundAfterDelivery"` and
+  `remark: "签收后退款订单"`.
+- Keep separate stats for cancellation/not-shipped candidates and actual zero rows:
   `cancelledCandidateCount` records how many cancelled candidates appeared in
-  scanned list pages; `skipped.cancelledAsZero` records how many were written
-  into the result set as zero-income orders.
+  scanned list pages; `notShippedCandidateCount` records how many not-shipped
+  candidates appeared in scanned list pages; `skipped.cancelledAsZero` and
+  `skipped.notShippedAsZero` record how many were written into the result set as
+  zero-income orders.
 
 Performance and limits:
 
-- `TEMU_ORDER_SALES_DETAIL_CONCURRENCY` is hard-capped at `4`, even if a higher
-  value is supplied. Validation showed higher concurrency can stall the browser
-  and produce many timeouts.
+- `TEMU_ORDER_SALES_DETAIL_CONCURRENCY` defaults to `4` and is hard-capped at
+  `4`, even if a higher value is supplied. Worker count is
+  `min(concurrency, candidateCount)`, so tiny shops do not start more workers
+  than they have candidate orders.
+- After the first detail pass, retry failed detail orders for two additional
+  rounds. Preserve attempt errors in `failedDetails[].attemptErrors` if all
+  retries still fail.
+- Normal order-income runs close pages and the CDP Chrome process after
+  collection. During interactive repeated test runs only, set
+  `TEMU_CLOSE_CHROME_PROCESS=0` to keep Chrome warm between runs, and optionally
+  set `TEMU_CLOSE_CHROME_PAGES=0` if the page itself must remain open.
 - `TEMU_ORDER_SALES_LIMIT` means per account per region when
   `TEMU_ORDER_SALES_LIMIT_PER_SHOP` is not set.
 - If a region or shop has fewer eligible orders than the limit, use the actual
