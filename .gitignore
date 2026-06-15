@@ -9,5 +9,9 @@ temu-reports/
 temu-chrome-cdp-profile/
 temu-chrome-cdp-profile-account2/
 temu-playwright-profile/
+dianxiaomi-chrome-cdp-profile/
+*chrome-cdp-profile*/
 
 *.log
+*.swp
+*.swo

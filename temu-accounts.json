@@ -21,6 +21,15 @@
         "LEEEV",
         "LEEEV Selected"
       ]
+    },
+    {
+      "id": "wonder",
+      "label": "WONDER",
+      "dailyReportEnabled": false,
+      "cdpProfileDir": "/Users/vure/ReportDalily/temu-chrome-cdp-profile-wonder",
+      "cdpPort": 9224,
+      "shops": ["Wonder Products"],
+      "knownShops": ["Wonder Products"]
     }
   ]
 }

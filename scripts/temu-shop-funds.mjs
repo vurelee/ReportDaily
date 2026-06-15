@@ -15,6 +15,7 @@ import {
 import { temuPageApiPost } from "./temu-page-api-client.mjs";
 import { extractMallList, resolveMallByExactName } from "./temu-mall-resolver.mjs";
 import { closeTemuPopups } from "./temu-popup-cleaner.mjs";
+import { collectSuccessfulWithdrawalRecordsByShopName } from "./temu-shop-withdrawal-records.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const accountsPath = process.env.TEMU_ACCOUNTS_CONFIG || path.join(rootDir, "temu-accounts.json");
@@ -45,6 +46,10 @@ const FUND_SHOP_REGISTRY = {
   "whitine-leeev": {
     semiManaged: ["Whitine Products Global", "LEEEV Global Outlet", "LEEEV"],
     fullManaged: ["Whitine Products"],
+  },
+  wonder: {
+    semiManaged: ["Wonder Products"],
+    fullManaged: [],
   },
 };
 
@@ -208,6 +213,7 @@ async function waitForCdp(account, timeoutMs = 25000) {
 
 function chromeArgs(account, url) {
   return [
+    ...(process.env.TEMU_CDP_HEADLESS === "1" ? ["--headless=new"] : []),
     `--remote-debugging-port=${account.cdpPort}`,
     `--user-data-dir=${account.cdpProfileDir}`,
     "--no-first-run",
@@ -260,6 +266,15 @@ async function resetCdpChrome(account) {
 
 async function ensureCdpChrome(account, url = targetUrl) {
   if (await isCdpReady(account)) return;
+
+  if (process.env.TEMU_CDP_HEADLESS === "1") {
+    if (!launchWithChromeBinary(account, url)) {
+      fail("CHROME_EXECUTABLE_NOT_FOUND", "Google Chrome executable not found for headless CDP launch");
+    }
+    await waitForCdp(account, 25000);
+    return;
+  }
+
   launchWithOpen(account, url);
   try {
     await waitForCdp(account);
@@ -581,6 +596,10 @@ async function collectShopFunds(page, shopName, mallInfo, shopType = "") {
   const availableBalanceText = amount.availableBalanceFormat?.digitalText || availableBalance;
   const availableBalanceAmountInCents = amountValue(amount.availableBalanceFormat);
   const withdrawalRecords = await collectWithdrawalRecords(page, shopName, mallInfo);
+  const successfulWithdrawalRecords = await collectSuccessfulWithdrawalRecordsByShopName(page, shopName, {
+    mallId: mallInfo.mallId,
+    sellerApiPost,
+  });
   const settledAmountInCents = availableBalanceAmountInCents + amountValue(withdrawalRecords.totalAmount);
   const domBalance = await domAvailableBalance(page);
 
@@ -600,6 +619,7 @@ async function collectShopFunds(page, shopName, mallInfo, shopType = "") {
       totalAmountText: amountTextFromValue(settledAmountInCents),
       domBalanceText: moneyNumber(domBalance) === moneyNumber(availableBalanceText) ? domBalance : "",
     },
+    successfulWithdrawalRecords,
     pendingFunds: null,
     source: "seller-center-page-api",
     apiReport: {

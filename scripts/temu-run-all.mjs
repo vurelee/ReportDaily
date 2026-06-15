@@ -175,7 +175,7 @@ function summarizeError(stdout, stderr, code) {
 const accountConfig = JSON.parse(await fs.readFile(accountsPath, "utf8"));
 const results = [];
 
-for (const account of accountConfig.accounts || []) {
+for (const account of (accountConfig.accounts || []).filter((item) => item.dailyReportEnabled !== false)) {
   console.log(`Running account: ${account.label || account.id}`);
   results.push(await runAccount(account));
 }

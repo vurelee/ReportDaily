@@ -78,6 +78,7 @@ async function resetCdpChrome(options = {}) {
 function chromeArgs(url, options = {}) {
   const cdp = cdpConfig(options);
   return [
+    ...(process.env.TEMU_CDP_HEADLESS === "1" ? ["--headless=new"] : []),
     `--remote-debugging-port=${cdp.cdpPort}`,
     `--user-data-dir=${cdp.cdpProfileDir}`,
     "--no-first-run",
@@ -114,6 +115,14 @@ function launchWithChromeBinary(url, options = {}) {
 
 export async function ensureCdpChrome(url = config.temuHomeUrl, options = {}) {
   if (await isCdpReady(options)) return;
+
+  if (process.env.TEMU_CDP_HEADLESS === "1") {
+    if (!launchWithChromeBinary(url, options)) {
+      throw new Error("Google Chrome executable not found for headless CDP launch");
+    }
+    await waitForCdp(options, 20000);
+    return;
+  }
 
   launchWithOpen(url, options);
 

@@ -24,7 +24,12 @@
     "temu:operation-status:image": "node scripts/temu-operation-status-image.mjs",
     "temu:abnormal:capture": "TEMU_CAPTURE_NETWORK=1 node scripts/temu-abnormal-orders.mjs",
     "temu:shop-funds": "node scripts/temu-shop-funds.mjs",
-    "temu:order-sales-income": "node scripts/temu-order-sales-income.mjs"
+    "temu:withdraw-records:collect": "node scripts/temu-withdraw-records.mjs",
+    "temu:withdraw-records:sync": "node scripts/temu-withdraw-records.mjs --submit",
+    "temu:withdraw-records:submit": "node scripts/temu-submit-withdraw-records.mjs",
+    "temu:finance-expense-details": "node scripts/temu-finance-expense-details.mjs",
+    "temu:order-sales-income": "node scripts/temu-order-sales-income.mjs",
+    "temu:profit-reconciliation": "node scripts/temu-profit-reconciliation-sync.mjs"
   },
   "dependencies": {
     "playwright": "^1.52.0"

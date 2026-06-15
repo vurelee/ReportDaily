@@ -214,11 +214,49 @@ TEMU_ACCOUNT_ID=whitine-leeev npm run temu:abnormal
 /Users/vure/ReportDalily/temu-reports
 ```
 
+## 提现记录提交到 ERP
+
+提现补齐不需要跑 `temu:shop-funds`，也不需要采集待结算资金。直接使用成功提现专用入口：
+
+```bash
+TEMU_ACCOUNT_ID=setonr TEMU_WITHDRAW_SHOPS="SETONR Origin" npm run temu:withdraw-records:sync
+```
+
+该命令只调用 Seller Center 提现记录接口，采集 `withdrawCashStatus === 银行受理成功` 的记录，保存 `temu-withdraw-records-*.json`，然后提交到 ERP。店铺名匹配大小写不敏感，例如 `--shop "setonr origin"` 会匹配 `SETONR Origin`。
+
+只采集不提交：
+
+```bash
+TEMU_ACCOUNT_ID=setonr TEMU_WITHDRAW_SHOPS="setonr origin" npm run temu:withdraw-records:collect
+```
+
+从现有 JSON dry-run 预览或重提：
+
+```bash
+npm run temu:withdraw-records:submit -- \
+  --input temu-reports/temu-withdraw-records-2026-06-08T12-42-47-812Z.json \
+  --account setonr \
+  --shop "setonr origin" \
+  --dry-run
+```
+
+`--since` 默认是 `auto`：脚本会先调用 ERP latest cursor 接口查询该店铺最新成功提现时间，再只提交晚于 `latestRecord.withdrawAtText` 的记录。若 ERP 查不到店铺，或 `latestRecord` 为 `null`，则提交输入 JSON 里采集到的全部成功提现记录。可用 `--since "YYYY-MM-DD HH:mm:ss"` 手动覆盖游标；可用 `--since none` 跳过 latest 查询，直接依赖 ERP upsert 幂等提交全部成功记录。
+
+提交脚本会自动加载 `.env.local`，并且不会覆盖命令行临时传入的环境变量。云端 ERP 地址建议在 `.env.local` 中配置：
+
+```bash
+STOCKHELP_BASE_URL=https://whitine.com
+STOCKHELP_INTEGRATION_API_TOKEN=int_xxx
+```
+
+`temu:shop-funds` 仍会在每个店铺结果里保留两类提现记录：`settledFunds.withdrawalRecords` 用于 `发起申请` / `银行处理中` 的资金合计；`successfulWithdrawalRecords` 用于 `银行受理成功` 的提现收入提交兼容。补齐 ERP 提现收入时优先用 `temu:withdraw-records:sync`，避免额外采集资金汇总。dry-run 输出会显示 payload 的 `store.platform` / `store.name`、since 模式、游标、记录数和时间范围。脚本不会打印 integration token。
+
 ## 可配置环境变量
 
 - `TEMU_PROFILE_DIR`: 覆盖 Playwright 专用 profile 目录
 - `TEMU_CDP_PROFILE_DIR`: 覆盖普通 Chrome CDP profile 目录
 - `TEMU_CDP_PORT`: 覆盖 CDP 端口，默认 `9222`
+- `TEMU_CDP_HEADLESS=1`: 用 Chrome `--headless=new` 启动 CDP profile，跳过 macOS `open`，适合不显示窗口、不抢占焦点；Codex 定时入口默认开启。遇到登录、短信或验证码时，临时设为 `0` 改回可见 Chrome 人工处理
 - `TEMU_REPORT_DIR`: 覆盖报告输出目录
 - `WECOM_WEBHOOK_URL`: 企业微信群机器人 webhook 地址；企业微信图片推送必须配置
 - `TEMU_SEND_WECOM=0`: 生成汇总图片时跳过企业微信群发送，适合测试
@@ -241,8 +279,8 @@ TEMU_ACCOUNT_ID=whitine-leeev npm run temu:abnormal
 - `TEMU_REPORT_DATE=today|yesterday`: 选择报表日期按钮，默认 `today`；定时任务在 `00:01` 自动使用 `yesterday`，在 `09:00` 使用 `today`
 - `TEMU_CODEX_MAX_ATTEMPTS`: Codex 定时入口的命令级最大尝试次数，默认 `2`
 - `TEMU_CODEX_RETRY_DELAY_SECONDS`: Codex 定时入口两次尝试之间的等待秒数，默认 `15`
-- `TEMU_CODEX_WAKE_DELAY_SECONDS`: Codex 定时入口唤醒并等待桌面恢复的秒数，默认 `25`
-- `TEMU_CODEX_WAKE_DISPLAY=0`: 关闭 Codex 定时入口的显示器唤醒等待，通常只在调试 wrapper 时使用
+- `TEMU_CODEX_WAKE_DELAY_SECONDS`: Codex 定时入口唤醒并等待桌面恢复的秒数，仅在 `TEMU_CODEX_WAKE_DISPLAY=1` 时使用，默认 `25`
+- `TEMU_CODEX_WAKE_DISPLAY=1`: 开启 Codex 定时入口的显示器唤醒等待；默认关闭，避免定时任务打扰当前桌面
 - `TEMU_LAUNCHD_WAKE_DELAY_SECONDS`: launchd 定时入口唤醒并等待桌面恢复的秒数，默认 `25`
 - `TEMU_LAUNCHD_WAKE_DISPLAY=0`: 关闭 launchd 定时入口的显示器唤醒等待，通常只在调试 wrapper 时使用
 - `TEMU_SHOPS`: 覆盖巡检店铺列表，默认 `SETONR Products,SETONR Origin`
@@ -251,6 +289,9 @@ TEMU_ACCOUNT_ID=whitine-leeev npm run temu:abnormal
 - `TEMU_LOGIN_PASSWORD`: 登录态失效时自动登录用的密码，不建议写入文件
 - `TEMU_AUTO_LOGIN=0`: 关闭自动登录，只复用现有登录态
 - `TEMU_ACCOUNTS_CONFIG`: 覆盖多账号配置文件，默认 `temu-accounts.json`
+- `TEMU_WITHDRAW_SHOPS`: 覆盖提现记录采集店铺列表，大小写不敏感；未设置时使用账号配置里的 `shops`
+- `STOCKHELP_BASE_URL`: ERP API 基础地址，云端使用 `https://whitine.com`；未配置时默认 `http://127.0.0.1:3000`
+- `STOCKHELP_INTEGRATION_API_TOKEN` / `INTEGRATION_API_TOKEN`: ERP integration API token；提现提交脚本用于 latest cursor 查询和 batch upsert，不会打印该值
 
 第二个账号巡检时同样带上独立 profile 和端口；如果店铺名不同，再加 `TEMU_SHOPS`：
 
@@ -273,7 +314,7 @@ npm run temu:report
 - `00:01`：通过 API 时间戳汇总并推送昨日数据，标题使用 `昨日汇总`
 - `09:00`：通过 API 时间戳汇总并推送今日数据
 
-Codex 自动化会调用 `npm run temu:report:codex:yesterday` 和 `npm run temu:report:codex:today`。入口 `/Users/vure/ReportDalily/scripts/run-codex-temu-report.sh` 会先用 `caffeinate -u` 声明用户活跃并等待桌面恢复，再用 `caffeinate -d -i -m` 包住整次采集。产品广告数据默认走 `TEMU_PRODUCT_SOURCE=api`，从页面登录态调用 Temu 接口切店和拉取报表；出库单异常默认走 `TEMU_ABNORMAL_SOURCE=api`，从 agentseller 登录态按 `mallid` 拉取异常数量和明细；店铺运营状态默认走 agentseller `product/skc/pageQuery`。需要调试出库单异常旧路径时，可临时设置 `TEMU_ABNORMAL_SOURCE=dom`。
+Codex 自动化会调用 `npm run temu:report:codex:yesterday` 和 `npm run temu:report:codex:today`。入口 `/Users/vure/ReportDalily/scripts/run-codex-temu-report.sh` 默认设置 `TEMU_CDP_HEADLESS=1` 和 `TEMU_CODEX_WAKE_DISPLAY=0`，用无窗口 Chrome CDP 跑采集，不主动唤醒显示器，也不阻止显示器自行睡眠；只用 `caffeinate -i -m` 包住整次采集，避免系统在运行中睡眠。产品广告数据默认走 `TEMU_PRODUCT_SOURCE=api`，从页面登录态调用 Temu 接口切店和拉取报表；出库单异常默认走 `TEMU_ABNORMAL_SOURCE=api`，从 agentseller 登录态按 `mallid` 拉取异常数量和明细；店铺运营状态默认走 agentseller `product/skc/pageQuery`。需要调试出库单异常旧路径时，可临时设置 `TEMU_ABNORMAL_SOURCE=dom`。遇到登录、短信或验证码阻塞时，自动化应汇报外部阻塞，由人工用可见 Chrome 完成验证后重跑。
 
 `09:00` 的 `today` 流程中，广告数据跑完后会用 `npm run temu:agentseller-checks` 按顺序跑出库单异常和店铺运营状态；调价待办拒绝暂停每日自动执行。两个检查完成后再发送销售汇总图片，以及包含出库异常和店铺运营状态的 `markdown_v2` 表格。
 

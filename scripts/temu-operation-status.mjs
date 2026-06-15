@@ -114,6 +114,7 @@ async function waitForCdp(account, timeoutMs = 25000) {
 
 function chromeArgs(account, url) {
   return [
+    ...(process.env.TEMU_CDP_HEADLESS === "1" ? ["--headless=new"] : []),
     `--remote-debugging-port=${account.cdpPort}`,
     `--user-data-dir=${account.cdpProfileDir}`,
     "--no-first-run",
@@ -166,6 +167,15 @@ async function resetCdpChrome(account) {
 
 async function ensureCdpChrome(account, url = targetUrl) {
   if (await isCdpReady(account)) return;
+
+  if (process.env.TEMU_CDP_HEADLESS === "1") {
+    if (!launchWithChromeBinary(account, url)) {
+      fail("CHROME_EXECUTABLE_NOT_FOUND", "Google Chrome executable not found for headless CDP launch");
+    }
+    await waitForCdp(account, 25000);
+    return;
+  }
+
   launchWithOpen(account, url);
   try {
     await waitForCdp(account);
@@ -770,7 +780,9 @@ async function runAccount(account, previousShopIndex) {
 
 const accountConfig = JSON.parse(await fs.readFile(accountsPath, "utf8"));
 const selectedIds = selectedAccountIds();
-const accounts = (accountConfig.accounts || []).filter((account) => selectedIds.length === 0 || selectedIds.includes(account.id));
+const accounts = (accountConfig.accounts || []).filter((account) =>
+  selectedIds.length === 0 ? account.dailyReportEnabled !== false : selectedIds.includes(account.id),
+);
 if (accounts.length === 0) {
   fail("NO_MATCHING_ACCOUNTS", selectedIds.length ? `找不到账号：${selectedIds.join(",")}` : "账号配置为空");
 }

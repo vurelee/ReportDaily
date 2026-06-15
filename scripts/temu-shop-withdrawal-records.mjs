@@ -1,5 +1,5 @@
 import { temuPageApiPost } from "./temu-page-api-client.mjs";
-import { resolveMallByExactName } from "./temu-mall-resolver.mjs";
+import { resolveMallByName } from "./temu-mall-resolver.mjs";
 
 export const SELLER_ORIGIN = "https://seller.kuajingmaihuo.com";
 export const USER_INFO_ENDPOINT = "/bg/quiet/api/mms/userInfo";
@@ -56,7 +56,7 @@ async function defaultSellerApiPost(page, endpoint, body = {}, { mallId } = {}, 
 
 async function resolveMallIdByShopName(page, shopName, sellerApiPost) {
   const result = await sellerApiPost(page, USER_INFO_ENDPOINT, {}, {}, `${shopName} 卖家中心店铺列表接口`);
-  return resolveMallByExactName(result, shopName).mallId;
+  return resolveMallByName(result, shopName, { caseInsensitive: true }).mallId;
 }
 
 export async function collectSuccessfulWithdrawalRecordsByShopName(page, shopName, {

@@ -41,6 +41,14 @@ if [[ -z "${TEMU_PRODUCT_SOURCE:-}" ]]; then
   export TEMU_PRODUCT_SOURCE="api"
 fi
 
+if [[ -z "${TEMU_CDP_HEADLESS:-}" ]]; then
+  export TEMU_CDP_HEADLESS="1"
+fi
+
+if [[ -z "${TEMU_CODEX_WAKE_DISPLAY:-}" ]]; then
+  export TEMU_CODEX_WAKE_DISPLAY="0"
+fi
+
 case "$TEMU_PRODUCT_SOURCE" in
   api) ;;
   *)
@@ -106,9 +114,12 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-log_audit "start: pid=$$ ppid=$PPID report_date=$TEMU_REPORT_DATE product_source=$TEMU_PRODUCT_SOURCE pwd=$PWD path=$PATH max_attempts=$max_attempts"
+caffeinate_args=(-i -m)
+
+log_audit "start: pid=$$ ppid=$PPID report_date=$TEMU_REPORT_DATE product_source=$TEMU_PRODUCT_SOURCE cdp_headless=${TEMU_CDP_HEADLESS:-0} wake_display=${TEMU_CODEX_WAKE_DISPLAY:-0} pwd=$PWD path=$PATH max_attempts=$max_attempts"
 
 if [[ "${TEMU_CODEX_WAKE_DISPLAY:-1}" != "0" ]]; then
+  caffeinate_args=(-d -i -m)
   log_audit "preflight: wake_display delay=${wake_delay}s"
   /usr/bin/caffeinate -u -t "$wake_delay" >/dev/null 2>&1 || true
 fi
@@ -117,9 +128,9 @@ last_status=0
 attempt=1
 while (( attempt <= max_attempts )); do
   reset_cdp_chrome_ports
-  log_audit "run: attempt=$attempt/$max_attempts npm temu:report:all:image product_source=$TEMU_PRODUCT_SOURCE"
+  log_audit "run: attempt=$attempt/$max_attempts npm temu:report:all:image product_source=$TEMU_PRODUCT_SOURCE cdp_headless=${TEMU_CDP_HEADLESS:-0}"
 
-  if /usr/bin/caffeinate -d -i -m /Users/vure/.nvm/versions/node/v22.22.3/bin/npm run temu:report:all:image; then
+  if /usr/bin/caffeinate "${caffeinate_args[@]}" /Users/vure/.nvm/versions/node/v22.22.3/bin/npm run temu:report:all:image; then
     log_audit "success: attempt=$attempt/$max_attempts"
     exit 0
   else

@@ -70,6 +70,38 @@ When adding or changing order-income collection:
 - write stable JSON under `temu-reports/` before adding any image or WeCom
   delivery layer.
 
+## 2026-06-12 WONDER Funds Account
+
+`temu-accounts.json` now includes account id `wonder`, display label `WONDER`,
+CDP port `9224`, and profile
+`/Users/vure/ReportDalily/temu-chrome-cdp-profile-wonder`.
+
+`WONDER` does not participate in Ads daily reports: keep
+`dailyReportEnabled: false`, and keep daily-report account iteration filtering
+out accounts with that flag.
+
+The only configured shop is exact mall name `Wonder Products`
+(`mallId=634418216261468`). Seller Center returned `isSemiManagedMall: true`,
+so treat it as a semi-managed shop for funds collection. It participates in:
+
+- `temu-order-sales-income`
+- `temu-shop-funds`
+- `temu-withdraw-records-sync`
+
+Initial validation artifacts:
+
+- `temu-shop-funds-2026-06-12T06-55-46-022Z.json`: settled funds
+  `CNY 1,257.23`, pending funds `CNY 4,469.84`.
+- `temu-order-sales-income-2026-06-12T06-56-34-292Z.json`: 2026-06-01 to
+  2026-06-12, EU `0` orders and US `1` not-shipped zero-income row.
+- `temu-withdraw-records-2026-06-12T06-57-20-876Z.json`: successful withdrawal
+  records `247`, total `CNY 1,304,400.00`; submit dry-run showed
+  store-not-found auto cursor and `Records: 247`.
+
+For all Chrome CDP collectors, default to headless/no-disturbance execution.
+Use visible Chrome only for manual login, SMS/captcha/slider verification,
+inspection after failure, or an explicit user request.
+
 ## 2026-06-07 Seller Center Login Refactor
 
 Seller Center and AgentSeller login handling is centralized in
