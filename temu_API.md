@@ -407,7 +407,7 @@ mallid: <mallId>
 https://seller.kuajingmaihuo.com/labor/account
 ```
 
-当前已验证的已结算款项来源是 Seller Center 页面内 API。页面负责复用 Chrome 登录态和当前店铺 session，数据读取走接口，不从 DOM 表格采集。
+当前已验证的可提现金额来源是 Seller Center 页面内 API。页面负责复用 Chrome 登录态和当前店铺 session，数据读取走接口，不从 DOM 表格采集。
 
 ### Seller Center 店铺列表
 
@@ -474,15 +474,15 @@ POST /api/merchant/payment/account/mall/entity/query
 
 当前脚本会校验这里的 `mallId` 等于目标店铺的 `mallId`。
 
-### 已结算资金
+### 可提现金额
 
-用途：获取资金中心页面里的已结算资金。当前口径不是只取页面 `可用余额(CNY)`，而是：
+用途：获取资金中心页面里的可提现金额。当前口径不是只取页面 `可用余额(CNY)`，而是：
 
 ```text
-已结算资金 = 已结算-可用余额 + 发起申请 + 银行处理中
+可提现金额 = 可用余额 + 发起申请 + 银行处理中
 ```
 
-其中 `已结算-可用余额` 来自页面标签 `可用余额(CNY)`。
+其中 `可用余额` 来自页面标签 `可用余额(CNY)`。
 
 ```http
 POST /api/merchant/payment/account/amount/info
@@ -559,16 +559,16 @@ POST /api/merchant/payment/account/withdraw/cash/record
 - 调用 `mall/entity/query` 和 `amount/info` 时带请求头 `mallid: <mallId>`、请求体 `{}`。
 - 调用 `withdraw/cash/record` 时同样带请求头 `mallid: <mallId>`，按 `pageSize=100` 翻页拉完整提现记录。
 - 由页面 fetch/runtime 自动生成 `Anti-Content`；不要保存或复用抓包里的固定 `Anti-Content`。
-- `amount/info` 的 `availableBalance` / `availableBalanceFormat.digitalText` 作为 `已结算-可用余额`。
+- `amount/info` 的 `availableBalance` / `availableBalanceFormat.digitalText` 作为 `可用余额`。
 - 提现记录只统计 `withdrawCashStatus` 为 `发起申请` 或 `银行处理中` 的 `withdrawCashAmountFormat.value`。
-- 最终 `settledFunds.amountInCents` / `settledFunds.totalAmountText` 是 `已结算-可用余额 + 发起申请 + 银行处理中` 的合计。
+- 最终 `settledFunds.amountInCents` / `settledFunds.totalAmountText` 是 `可用余额 + 发起申请 + 银行处理中` 的合计。
 
 已验证样例：
 
 - `LEEEV` 店铺 `mallId=634418217285830`。
-- `已结算-可用余额` 为 `2,049.60`。
+- `可用余额` 为 `2,049.60`。
 - 提现记录中有一笔 `2026-06-05 21:20:48` 的 `发起申请`，金额 `5,200.00`。
-- 新口径已结算资金为 `7,249.60`。
+- 新口径可提现金额为 `7,249.60`。
 
 入口命令：
 

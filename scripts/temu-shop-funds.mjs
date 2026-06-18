@@ -609,8 +609,8 @@ async function collectShopFunds(page, shopName, mallInfo, shopType = "") {
     shopType: shopType || (mallInfo.isSemiManagedMall ? "semi-managed" : ""),
     currency: amount.currency || amount.availableBalanceFormat?.currencyCode || "CNY",
     settledFunds: {
-      label: "已结算资金",
-      availableBalanceLabel: "已结算-可用余额",
+      label: "可提现金额",
+      availableBalanceLabel: "可用余额",
       availableBalance,
       availableBalanceText,
       availableBalanceAmountInCents,
@@ -824,7 +824,7 @@ async function runAccount(account) {
       const mallInfo = mallInfoForShop(malls, shopName);
       const result = await collectShopFunds(activePage, shopName, mallInfo, pendingShopType(account, shopName));
       shopResults.push(result);
-      console.error(`${shopName}: 已结算资金 CNY ${result.settledFunds.totalAmountText}`);
+      console.error(`${shopName}: 可提现金额 CNY ${result.settledFunds.totalAmountText}`);
     }
 
     const pending = await collectPendingFunds(context, activePage, account);
@@ -848,7 +848,7 @@ async function runAccount(account) {
 }
 
 function shopMessage(shop) {
-  const parts = [`${shop.shopName} 已结算资金 CNY ${shop.settledFunds.totalAmountText}`];
+  const parts = [`${shop.shopName} 可提现金额 CNY ${shop.settledFunds.totalAmountText}`];
   if (shop.pendingFunds?.totalAmount?.digitalText) {
     parts.push(`${shop.pendingFunds.label} CNY ${shop.pendingFunds.totalAmount.digitalText}`);
   }

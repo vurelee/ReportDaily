@@ -38,6 +38,7 @@ flowchart TB
     Operation["temu-operation-status.mjs<br/>AgentSeller operation status"]
     Price["temu-price-adjust-reject.mjs<br/>AgentSeller price-adjust reject"]
     OrderIncome["temu-order-sales-income.mjs<br/>AgentSeller order sales income"]
+    FinanceExpense["temu-finance-expense-details.mjs<br/>Seller Center finance expense details"]
   end
 
   MallResolver --> Product
@@ -46,6 +47,7 @@ flowchart TB
   MallResolver --> Operation
   MallResolver --> Price
   MallResolver --> OrderIncome
+  MallResolver --> FinanceExpense
 
   Product --> Reports["temu-reports/*.json"]
   Funds --> Reports
@@ -53,6 +55,7 @@ flowchart TB
   Operation --> Reports
   Price --> Reports
   OrderIncome --> Reports
+  FinanceExpense --> Reports
 
   Reports --> Summary["summary / markdown / image scripts"]
   Summary --> WeCom["wecom-send.mjs<br/>Enterprise WeChat webhook"]
@@ -274,6 +277,7 @@ Current consumers:
 - `scripts/temu-price-adjust-reject.mjs`
 - `scripts/temu-shop-funds.mjs`
 - `scripts/temu-report.mjs`
+- `scripts/temu-finance-expense-details.mjs`
 
 These scripts now demonstrate the intended split:
 
@@ -408,3 +412,57 @@ Verification samples from implementation:
   income fields set to `0`.
 - US `SETONR Products`, `2026-05-01`, limit `100`, total list count `9`,
   output saved `9/9` with `targetMet=true`.
+
+## 2026-06-15 Finance Expense Details Scanner
+
+`scripts/temu-finance-expense-details.mjs` is the dedicated Seller Center
+finance expense-detail runner for `/labor/bill`. Use:
+
+```bash
+npm run temu:finance-expense-details -- ...
+```
+
+Scope and defaults:
+
+- Keep this runner separate from shop funds, successful withdrawals, order sales
+  income, and Ads daily reports.
+- Use the live Seller Center page context through
+  `scripts/temu-page-api-client.mjs`; do not replace it with raw Node HTTP
+  because cookies, risk headers, and `mallid` are required.
+- Resolve shops through `scripts/temu-mall-resolver.mjs` with exact
+  `temu-accounts.json` shop names.
+- Default口径 is pure expense rows: `moneyChangeTypeList:[2]` plus
+  `fundType:[400]`. `--all-flow-out` intentionally widens to all flow-out rows,
+  including withdrawal and settlement rows.
+- Split longer date ranges into inclusive 31-day windows. Use page size `100`
+  unless running a smoke test.
+- `--all-known-shops --per-shop-json` collects `knownShops + shops` for the
+  selected account and writes one shop-named JSON per successful shop under
+  `temu-reports/`.
+
+Operational behavior:
+
+- Headless CDP is the default unless `TEMU_CDP_HEADLESS=0`.
+- Use `--retry-attempts` and `--page-delay-ms` for large backfills, because
+  Seller Center can return `429` or `网络超时`.
+- Resume is enabled by default. Per-shop JSONL checkpoints live under
+  `temu-reports/checkpoints/temu-finance-expense-details/`; every successful
+  page is appended, completed windows are skipped on rerun, incomplete windows
+  resume from the next missing page, and successful shop completion deletes the
+  checkpoint.
+- Use `--no-resume` only when checkpoint writes are not wanted, and
+  `--reset-checkpoint` for a clean rerun of the same shop/date/filter scope.
+
+Validated on 2026-06-15:
+
+- `SETONR Products` checkpoint smoke test: first run with `--max-pages 1`
+  wrote page 1; the second run resumed at page 2, completed 72 rows, and
+  removed the checkpoint.
+- The 2026-01-01 to 2026-05-31 all-known-shop backfill completed for nine
+  logged-in shops: `SETONR Products`, `SETONR DIRECT`, `SETONR Origin`,
+  `SETONR`, `Whitine Products`, `Whitine Products Global`,
+  `LEEEV Global Outlet`, `LEEEV`, and `LEEEV Selected`.
+- Completed total for those nine shops was 87,202 rows and CNY 2,503,003.19.
+- `Wonder Products` was not collected because the WONDER Seller Center profile
+  returned `SELLER_LOGIN_AUTOFILL_NOT_CONFIRMED`; repair that login state before
+  rerunning the `wonder` account.
