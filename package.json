@@ -24,6 +24,7 @@
     "temu:operation-status:image": "node scripts/temu-operation-status-image.mjs",
     "temu:abnormal:capture": "TEMU_CAPTURE_NETWORK=1 node scripts/temu-abnormal-orders.mjs",
     "temu:shop-funds": "node scripts/temu-shop-funds.mjs",
+    "temu:shop-funds:image": "node scripts/temu-shop-funds-image.mjs",
     "temu:withdraw-records:collect": "node scripts/temu-withdraw-records.mjs",
     "temu:withdraw-records:sync": "node scripts/temu-withdraw-records.mjs --submit",
     "temu:withdraw-records:submit": "node scripts/temu-submit-withdraw-records.mjs",

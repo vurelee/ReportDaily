@@ -11,12 +11,12 @@ function normalizeReportDate(value) {
   throw new Error("TEMU_REPORT_DATE must be today or yesterday");
 }
 
-function runNode(label, script, args = []) {
+function runNode(label, script, args = [], options = {}) {
   return new Promise((resolve, reject) => {
     console.log(`Running ${label}: ${["node", script, ...args].join(" ")}`);
     const child = spawn(process.execPath, [script, ...args], {
       cwd: rootDir,
-      env: process.env,
+      env: { ...process.env, ...(options.env || {}) },
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -68,26 +68,29 @@ if (reportDate === "today") {
     "--include-abnormal",
     "--abnormal-input",
     abnormalJson,
-  ]);
-  await runNode("operation status markdown delivery", "scripts/temu-operation-status-markdown.mjs", [
-    "--input",
+    "--include-operation-status",
+    "--operation-status-input",
     operationJson,
-    "--abnormal-input",
-    abnormalJson,
-    "--send-wecom",
   ]);
 } else {
-  const operationResult = await runNode("operation status", "scripts/temu-operation-status.mjs");
-  const operationJson = savedJsonPath(operationResult.stdout, /^temu-operation-status-.+\.json$/, "operation status");
+  const shopFundsJsons = [];
+  for (const accountId of ["setonr", "whitine-leeev", "wonder"]) {
+    const shopFundsResult = await runNode(`shop funds ${accountId}`, "scripts/temu-shop-funds.mjs", [], {
+      env: {
+        TEMU_ACCOUNT_ID: accountId,
+        TEMU_CDP_HEADLESS: process.env.TEMU_CDP_HEADLESS || "1",
+      },
+    });
+    shopFundsJsons.push(savedJsonPath(shopFundsResult.stdout, /^temu-shop-funds-.+\.json$/, `shop funds ${accountId}`));
+  }
 
   await runNode("summary image delivery", "scripts/temu-summary-image.mjs", [
     "--input",
     combinedJson,
     "--send-wecom",
   ]);
-  await runNode("operation status markdown delivery", "scripts/temu-operation-status-markdown.mjs", [
-    "--input",
-    operationJson,
+  await runNode("shop funds image delivery", "scripts/temu-shop-funds-image.mjs", [
+    ...shopFundsJsons.flatMap((shopFundsJson) => ["--input", shopFundsJson]),
     "--send-wecom",
   ]);
 }
