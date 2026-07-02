@@ -457,33 +457,26 @@ function operationAbnormalSpuIds(shop) {
   return [...new Set(ids.map((id) => String(id || "").trim()).filter(Boolean))];
 }
 
-function operationAbnormalSpuMarkdown(shop) {
-  const ids = operationAbnormalSpuIds(shop);
-  if (ids.length === 0) return "-";
-  return `<font color="warning">${ids.join("、")}</font>`;
-}
-
-function buildOperationStatusMarkdown(operationReport) {
+function buildOperationAbnormalSpuMarkdown(operationReport) {
   if (!operationReport) return "";
 
   const rows = [];
   for (const result of operationReport.results || []) {
     if (!result.ok) {
       rows.push(
-        `${result.account?.label || result.account?.id || "账号"} / - / <font color="warning">检查失败：${result.error || "未知错误"}</font>`,
+        `${result.account?.label || result.account?.id || "账号"} 店铺运营状态检查失败：${result.error || "未知错误"}`,
       );
       continue;
     }
 
     for (const shop of result.shops || []) {
-      rows.push(
-        `${shop.shopName} / ${shop.inSaleSpuCount || 0} / ${operationAbnormalSpuMarkdown(shop)}`,
-      );
+      const ids = operationAbnormalSpuIds(shop);
+      if (ids.length > 0) rows.push(`${shop.shopName} SPU ID <font color="warning">${ids.join("、")}</font>。`);
     }
   }
 
-  const body = rows.length > 0 ? rows.join("\n") : "暂无巡店结果";
-  return `### 店铺运营状态\n\n**店铺 / 在售SPU数 / 新增异常SPU**\n${body}`;
+  if (rows.length === 0) return "";
+  return `今日新增异常SPU：\n${rows.join("\n")}`;
 }
 
 function buildWecomMarkdown(report, abnormalReport, operationReport) {
@@ -491,7 +484,7 @@ function buildWecomMarkdown(report, abnormalReport, operationReport) {
     buildWecomMarkdownTitle(report),
     buildPartialReportMarkdown(report),
     buildAbnormalMarkdown(abnormalReport),
-    buildOperationStatusMarkdown(operationReport),
+    buildOperationAbnormalSpuMarkdown(operationReport),
   ]
     .filter(Boolean)
     .join("\n\n");
